@@ -560,3 +560,85 @@ def test_update_skips_when_current(tmp_path):
     assert "latest" in output.lower() or "already" in output.lower()
     # Should NOT say "updated" or "Installed"
     assert "Installed" not in output
+
+
+# ─── Test 11: install uses skill.toml category when manifest.category absent ──
+
+def test_install_uses_skill_toml_category(tmp_path):
+    """install should fall back to [skill].category from tarball's skill.toml
+    when manifest.category is absent from the install response."""
+    # Build a tarball that includes a skill.toml declaring category = "devops"
+    skill_toml_content = (
+        b"[skill]\n"
+        b'name = "devops-tool"\n'
+        b'version = "0.2.0"\n'
+        b'category = "devops"\n'
+        b'description = "A devops skill"\n'
+        b'license = "MIT"\n'
+        b'entrypoint = "SKILL.md"\n'
+        b'tier = "cook"\n'
+        b'is_public = false\n'
+    )
+    tarball_content = make_deterministic_tarball({
+        "SKILL.md": b"# devops-tool\n\nA devops skill.\n",
+        "skill.toml": skill_toml_content,
+    })
+    good_sha = sha256(tarball_content)
+
+    # Install response with NO manifest.category (empty manifest)
+    install_meta = {
+        "slug": "devops-tool",
+        "version": "0.2.0",
+        "tarball_url": "__TARBALL_URL__",
+        "checksum_sha256": good_sha,
+        "manifest": {},  # no category — forces fallback to skill.toml
+    }
+
+    routes: dict = {}
+    srv = RecordingServer(routes)
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    install_meta["tarball_url"] = f"{base}/tarball/devops-tool-0.2.0.tar.gz"
+
+    routes[("GET", "/skills/install")] = (200, {}, install_meta)
+    routes[("GET", "/tarball/devops-tool-0.2.0.tar.gz")] = (200, {}, tarball_content)
+
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    mod = load_cli_module("recipes_cli_test11")
+    skills_dir = tmp_path / "hermes_skills"
+    original_api = mod.API_BASE
+    original_skills = mod.SKILLS_DIR
+    mod.API_BASE = base
+    mod.SKILLS_DIR = skills_dir
+
+    try:
+        class FakeArgs:
+            slug = "devops-tool"
+            force = False
+            client_mode = False
+            report_to = None
+
+        mod.cmd_install(FakeArgs())
+
+        # Must be installed under devops/ (read from skill.toml), not general/
+        expected_path = skills_dir / "devops" / "devops-tool" / ".recipes-meta.json"
+        wrong_path = skills_dir / "general" / "devops-tool" / ".recipes-meta.json"
+
+        assert expected_path.exists(), (
+            f".recipes-meta.json not found at expected devops path {expected_path}"
+        )
+        assert not wrong_path.exists(), (
+            f"Skill was incorrectly installed under general/ instead of devops/"
+        )
+
+        with open(expected_path) as f:
+            meta = json.load(f)
+        assert meta["slug"] == "devops-tool"
+        assert meta["version"] == "0.2.0"
+
+    finally:
+        mod.API_BASE = original_api
+        mod.SKILLS_DIR = original_skills
+        srv.shutdown()

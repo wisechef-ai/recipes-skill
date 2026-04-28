@@ -438,9 +438,9 @@ def cmd_install(args: argparse.Namespace) -> None:
     if not remote_sha256:
         sys.exit(f"Install response missing checksum_sha256: {info}")
     manifest: dict = info.get("manifest", {})
-    category: str = manifest.get("category", "general")
+    category: str = manifest.get("category", "")
 
-    install_dir = SKILLS_DIR / category / remote_slug
+    install_dir = SKILLS_DIR / (category or "general") / remote_slug
     meta_path = install_dir / ".recipes-meta.json"
 
     # Skip if already at this version (unless --force)
@@ -465,6 +465,29 @@ def cmd_install(args: argparse.Namespace) -> None:
             f"  got:      {actual_sha256}"
         )
     print(f"sha256 verified: {actual_sha256}")
+
+    # If manifest.category was absent, try reading category from skill.toml inside tarball
+    if not category:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+                toml_member = next(
+                    (m for m in tar.getmembers() if m.name.lstrip("./") == "skill.toml" or m.name == "skill.toml"),
+                    None,
+                )
+                if toml_member:
+                    raw_toml = tar.extractfile(toml_member)
+                    if raw_toml:
+                        parsed = tomllib.loads(raw_toml.read().decode("utf-8", errors="replace"))
+                        category = parsed.get("skill", parsed).get("category", "")
+        except Exception:
+            pass  # best-effort; fall through to default
+
+    if not category:
+        category = "general"
+
+    # Recalculate install_dir now that category is resolved
+    install_dir = SKILLS_DIR / category / remote_slug
+    meta_path = install_dir / ".recipes-meta.json"
 
     # Extract (safe path stripping)
     install_dir.mkdir(parents=True, exist_ok=True)
