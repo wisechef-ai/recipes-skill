@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""
+recipes — CLI for publishing and installing skills against recipes.wisechef.ai
+
+Usage:
+  recipes init <skill-name>
+  recipes pack [--out=<file>]
+  recipes publish [--api-key=<key>] [--private]
+  recipes install <slug>[@<version>] [--client-mode] [--report-to=<url>] [--force]
+  recipes update [<slug>]
+  recipes list
+
+Python 3.11+ stdlib only (+ cryptography for ed25519).
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import gzip
+import hashlib
+import io
+import json
+import os
+import pathlib
+import stat
+import sys
+import tarfile
+import time
+import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+# ─── Constants ──────────────────────────────────────────────────────────────
+
+API_BASE = "https://recipes.wisechef.ai/api"
+SKILLS_DIR = pathlib.Path.home() / ".hermes" / "skills"
+KEYS_DIR = pathlib.Path.home() / ".recipes" / "keys"
+
+EXCLUDE_DIRS_SET = {".git", "__pycache__", "venv", ".venv", "node_modules", ".eggs", "dist", "build"}
+EXCLUDE_FILES_SET = {".recipes-meta.json"}
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_skill_toml(cwd: pathlib.Path) -> dict:
+    toml_path = cwd / "skill.toml"
+    if not toml_path.exists():
+        sys.exit(f"Error: skill.toml not found in {cwd}")
+    with open(toml_path, "rb") as f:
+        return tomllib.load(f)
+
+
+def get_skill_section(meta: dict) -> dict:
+    """Support both flat toml and [skill] table."""
+    return meta.get("skill", meta)
+
+
+def api_get(url: str, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "recipes-cli/0.1.0 (+https://recipes.wisechef.ai)")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        sys.exit(f"HTTP {e.code} from {url}: {body}")
+    except urllib.error.URLError as e:
+        sys.exit(f"Network error reaching {url}: {e.reason}")
+
+
+def api_download(url: str, headers: dict | None = None) -> bytes:
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "recipes-cli/0.1.0 (+https://recipes.wisechef.ai)")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        sys.exit(f"HTTP {e.code} downloading {url}: {body}")
+    except urllib.error.URLError as e:
+        sys.exit(f"Network error downloading {url}: {e.reason}")
+
+
+def multipart_post(url: str, fields: dict, files: dict, headers: dict | None = None) -> dict:
+    """Multipart/form-data POST — stdlib only."""
+    boundary = "----RecipesBoundary" + hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+    parts: list[bytes] = []
+
+    for key, value in fields.items():
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            f"{value}\r\n".encode()
+        )
+
+    for key, (filename, data, content_type) in files.items():
+        header = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        parts.append(header)
+        parts.append(data if isinstance(data, bytes) else data.encode())
+        parts.append(b"\r\n")
+
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+
+    req_headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+        "User-Agent": "recipes-cli/0.1.0 (+https://recipes.wisechef.ai)",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    for k, v in req_headers.items():
+        req.add_header(k, v)
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="replace")
+        sys.exit(f"HTTP {e.code} from {url}: {body_err}")
+    except urllib.error.URLError as e:
+        sys.exit(f"Network error reaching {url}: {e.reason}")
+
+
+# ─── Ed25519 Key Management ──────────────────────────────────────────────────
+
+def get_or_create_keypair(slug: str):
+    """Return (private_key, pub_bytes_raw) for slug. Creates if missing."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            PublicFormat,
+            load_pem_private_key,
+        )
+    except ImportError:
+        sys.exit(
+            "Error: 'cryptography' package required for signing.\n"
+            "Install with: pip install cryptography>=42"
+        )
+
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    priv_path = KEYS_DIR / f"{slug}.priv"
+
+    if priv_path.exists():
+        with open(priv_path, "rb") as f:
+            priv_key = load_pem_private_key(f.read(), password=None)
+        print(f"Reusing keypair from {priv_path}")
+    else:
+        priv_key = Ed25519PrivateKey.generate()
+        pem = priv_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+        priv_path.write_bytes(pem)
+        os.chmod(priv_path, 0o600)
+        print(f"Generated new keypair → {priv_path}")
+
+    pub_bytes = priv_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return priv_key, pub_bytes
+
+
+def ed25519_sign(priv_key, data: bytes) -> bytes:
+    return priv_key.sign(data)
+
+
+# ─── Pack Helpers ────────────────────────────────────────────────────────────
+
+def collect_files(cwd: pathlib.Path) -> list[pathlib.Path]:
+    """Collect files for packing — deterministic sort, excludes noise."""
+    result: list[pathlib.Path] = []
+    for root, dirs, filenames in os.walk(cwd):
+        # In-place prune so os.walk won't descend into excluded dirs
+        dirs[:] = sorted(d for d in dirs if d not in EXCLUDE_DIRS_SET)
+        root_path = pathlib.Path(root)
+        for fname in sorted(filenames):
+            if fname in EXCLUDE_FILES_SET:
+                continue
+            result.append(root_path / fname)
+    return result
+
+
+def pack_tarball(cwd: pathlib.Path, out_path: pathlib.Path) -> str:
+    """Pack cwd into a deterministic tar.gz. Returns sha256 hex.
+
+    Determinism strategy:
+    - Files sorted lexicographically (collect_files guarantees this).
+    - TarInfo mtime/uid/gid/uname/gname fixed to 0 / "".
+    - Gzip mtime=0, compresslevel=6 — eliminates host-timestamp variation.
+    """
+    files = collect_files(cwd)
+
+    # Step 1: build an uncompressed tar in memory
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w") as tar:
+        for fpath in files:
+            rel = str(fpath.relative_to(cwd))
+            info = tarfile.TarInfo(name=rel)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.size = fpath.stat().st_size
+            info.mode = 0o644
+            with open(fpath, "rb") as fh:
+                tar.addfile(info, fh)
+
+    # Step 2: gzip-compress with mtime=0 for reproducibility
+    raw_bytes = raw.getvalue()
+    gz_buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz_buf, mode="wb", mtime=0, compresslevel=6) as gz:
+        gz.write(raw_bytes)
+
+    data = gz_buf.getvalue()
+    digest = sha256_bytes(data)
+    out_path.write_bytes(data)
+    return digest
+
+
+# ─── Subcommand: init ────────────────────────────────────────────────────────
+
+def cmd_init(args: argparse.Namespace) -> None:
+    cwd = pathlib.Path.cwd()
+    skill_name: str = args.skill_name
+    slug = skill_name.lower().replace(" ", "-").replace("_", "-")
+
+    toml_path = cwd / "skill.toml"
+    md_path = cwd / "SKILL.md"
+
+    if toml_path.exists():
+        sys.exit("Error: skill.toml already exists — refusing to overwrite.")
+    if md_path.exists():
+        sys.exit("Error: SKILL.md already exists — refusing to overwrite.")
+
+    toml_content = (
+        f'[skill]\n'
+        f'name = "{slug}"\n'
+        f'version = "0.1.0"\n'
+        f'description = "A brief description of {skill_name}"\n'
+        f'license = "MIT"\n'
+        f'entrypoint = "SKILL.md"\n'
+        f'tier = "cook"\n'
+        f'is_public = false\n'
+    )
+
+    md_content = f"""# {skill_name}
+
+> **Tier:** cook | **Version:** 0.1.0 | **License:** MIT
+
+## Overview
+
+Describe what this skill does and why it exists.
+
+## Usage
+
+```
+# How to invoke this skill
+```
+
+## Parameters
+
+| Parameter | Type     | Required | Description          |
+|-----------|----------|----------|----------------------|
+| example   | string   | yes      | An example parameter |
+
+## Examples
+
+```
+# Example invocation
+```
+
+## Notes
+
+Add any additional notes, caveats, or references here.
+
+---
+*Scaffolded by `recipes init {slug}`*
+"""
+
+    toml_path.write_text(toml_content, encoding="utf-8")
+    md_path.write_text(md_content, encoding="utf-8")
+
+    print(f"Initialized skill '{slug}' in {cwd}")
+    print(f"  Created: skill.toml")
+    print(f"  Created: SKILL.md")
+    print(f"\nNext steps:")
+    print(f"  1. Edit skill.toml — fill in description")
+    print(f"  2. Edit SKILL.md   — describe what your skill does")
+    print(f"  3. recipes pack    — create a distributable tarball")
+    print(f"  4. recipes publish — ship it to recipes.wisechef.ai")
+
+
+# ─── Subcommand: pack ────────────────────────────────────────────────────────
+
+def cmd_pack(args: argparse.Namespace) -> None:
+    cwd = pathlib.Path.cwd()
+    meta = load_skill_toml(cwd)
+    skill = get_skill_section(meta)
+
+    name = skill["name"]
+    version = skill["version"]
+
+    if args.out:
+        out_path = pathlib.Path(args.out)
+    else:
+        out_path = pathlib.Path(f"{name}-{version}.tar.gz")
+
+    digest = pack_tarball(cwd, out_path)
+    print(f"Packed: {out_path}")
+    print(f"sha256: {digest}")
+
+
+# ─── Subcommand: publish ─────────────────────────────────────────────────────
+
+def cmd_publish(args: argparse.Namespace) -> None:
+    import tempfile
+
+    cwd = pathlib.Path.cwd()
+    meta = load_skill_toml(cwd)
+    skill = get_skill_section(meta)
+
+    name = skill["name"]
+    version = skill["version"]
+    description = skill.get("description", "")
+    license_ = skill.get("license", "MIT")
+    tier = skill.get("tier", "cook")
+    is_public_toml = skill.get("is_public", False)
+
+    api_key = args.api_key or os.environ.get("RECIPES_API_KEY", "")
+    if not api_key:
+        sys.exit(
+            "Error: API key required.\n"
+            "  Use --api-key=<key> or export RECIPES_API_KEY=<key>"
+        )
+
+    # Determine visibility
+    is_public = not args.private if args.private else is_public_toml
+
+    # Pack into a temp file
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tf:
+        tmp_path = pathlib.Path(tf.name)
+
+    try:
+        print(f"Packing {name}@{version} ...")
+        digest = pack_tarball(cwd, tmp_path)
+        tarball_bytes = tmp_path.read_bytes()
+        print(f"sha256: {digest}")
+
+        # Sign
+        priv_key, pub_bytes = get_or_create_keypair(name)
+        # Endpoint verifies signature over sha256(tarball).digest(), not
+        # tarball bytes directly. Match the contract.
+        tarball_sha256_digest = hashlib.sha256(tarball_bytes).digest()
+        signature = ed25519_sign(priv_key, tarball_sha256_digest)
+
+        # Endpoint expects skill_toml, tarball, signature, signing_pubkey ALL
+        # as multipart files (UploadFile), plus is_public + changelog as form fields.
+        toml_path = cwd / "skill.toml"
+        toml_bytes = toml_path.read_bytes()
+        fields = {
+            "is_public": str(is_public).lower(),
+        }
+        files = {
+            "skill_toml": ("skill.toml", toml_bytes, "text/plain"),
+            "tarball": (f"{name}-{version}.tar.gz", tarball_bytes, "application/gzip"),
+            "signature": ("signature.bin", signature, "application/octet-stream"),
+            "signing_pubkey": ("pubkey.bin", pub_bytes, "application/octet-stream"),
+        }
+        headers = {"x-api-key": api_key}
+
+        print(f"Publishing {name}@{version} to {API_BASE}/skills/_publish ...")
+        resp = multipart_post(f"{API_BASE}/skills/_publish", fields, files, headers)
+
+        print(f"\n✓ Published: {name}@{version}")
+        print(f"  URL: {resp.get('url', 'N/A')}")
+        if resp.get("slug"):
+            print(f"  Slug: {resp['slug']}")
+        print(f"\nFull response:\n{json.dumps(resp, indent=2)}")
+
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+# ─── Subcommand: install ──────────────────────────────────────────────────────
+
+def cmd_install(args: argparse.Namespace) -> None:
+    slug_ver: str = args.slug
+    if "@" in slug_ver:
+        slug, version = slug_ver.rsplit("@", 1)
+    else:
+        slug, version = slug_ver, None
+
+    api_key = os.environ.get("RECIPES_API_KEY", "")
+    req_headers: dict[str, str] = {}
+    if api_key:
+        req_headers["x-api-key"] = api_key
+
+    # Fetch install manifest
+    url = f"{API_BASE}/skills/install?slug={urllib.parse.quote(slug)}"
+    if version:
+        url += f"&version={urllib.parse.quote(version)}"
+
+    print(f"Fetching install info for {slug} ...")
+    info = api_get(url, headers=req_headers)
+
+    remote_slug: str = info["slug"]
+    remote_version: str = info["version"]
+    tarball_url: str = info["tarball_url"]
+    # Endpoint field is checksum_sha256 (with sha256 as a legacy alias)
+    remote_sha256: str | None = info.get("checksum_sha256") or info.get("sha256")
+    if not remote_sha256:
+        sys.exit(f"Install response missing checksum_sha256: {info}")
+    manifest: dict = info.get("manifest", {})
+    category: str = manifest.get("category", "")
+
+    install_dir = SKILLS_DIR / (category or "general") / remote_slug
+    meta_path = install_dir / ".recipes-meta.json"
+
+    # Skip if already at this version (unless --force)
+    force = getattr(args, "force", False)
+    if not force and meta_path.exists():
+        with open(meta_path, encoding="utf-8") as f:
+            existing = json.load(f)
+        if existing.get("version") == remote_version:
+            print(f"Already installed {remote_slug}@{remote_version} — use --force to reinstall.")
+            return
+
+    # Download
+    print(f"Downloading {tarball_url} ...")
+    tarball_bytes = api_download(tarball_url, headers=req_headers)
+
+    # Verify sha256
+    actual_sha256 = sha256_bytes(tarball_bytes)
+    if actual_sha256 != remote_sha256:
+        sys.exit(
+            f"sha256 mismatch!\n"
+            f"  expected: {remote_sha256}\n"
+            f"  got:      {actual_sha256}"
+        )
+    print(f"sha256 verified: {actual_sha256}")
+
+    # If manifest.category was absent, try reading category from skill.toml inside tarball
+    if not category:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+                toml_member = next(
+                    (m for m in tar.getmembers() if m.name.lstrip("./") == "skill.toml" or m.name == "skill.toml"),
+                    None,
+                )
+                if toml_member:
+                    raw_toml = tar.extractfile(toml_member)
+                    if raw_toml:
+                        parsed = tomllib.loads(raw_toml.read().decode("utf-8", errors="replace"))
+                        category = parsed.get("skill", parsed).get("category", "")
+        except Exception:
+            pass  # best-effort; fall through to default
+
+    if not category:
+        category = "general"
+
+    # Recalculate install_dir now that category is resolved
+    install_dir = SKILLS_DIR / category / remote_slug
+    meta_path = install_dir / ".recipes-meta.json"
+
+    # Extract (safe path stripping)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(tarball_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            mname = member.name
+            # Safety checks
+            if mname.startswith("/") or ".." in mname.split("/"):
+                print(f"  [skip] unsafe path: {mname}")
+                continue
+            tar.extract(member, install_dir, set_attrs=False)
+
+    # Write .recipes-meta.json
+    meta: dict = {
+        "slug": remote_slug,
+        "version": remote_version,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "sha256": remote_sha256,
+        "source_url": tarball_url,
+    }
+    if getattr(args, "client_mode", False):
+        meta["client_mode"] = True
+    if getattr(args, "report_to", None):
+        meta["report_to"] = args.report_to
+
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"Installed {remote_slug}@{remote_version} at {install_dir}")
+
+
+# ─── Subcommand: update ───────────────────────────────────────────────────────
+
+def cmd_update(args: argparse.Namespace) -> None:
+    target_slug: str | None = getattr(args, "slug", None)
+
+    if not SKILLS_DIR.exists():
+        print("No skills installed (skills dir not found).")
+        return
+
+    meta_files = sorted(SKILLS_DIR.rglob(".recipes-meta.json"))
+    if not meta_files:
+        print("No installed skills found.")
+        return
+
+    api_key = os.environ.get("RECIPES_API_KEY", "")
+    req_headers: dict[str, str] = {}
+    if api_key:
+        req_headers["x-api-key"] = api_key
+
+    updated = 0
+    for meta_path in meta_files:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+
+        slug = meta.get("slug", "")
+        if target_slug and slug != target_slug:
+            continue
+
+        current_version = meta.get("version", "")
+        print(f"Checking {slug} (current: {current_version}) ...")
+
+        url = f"{API_BASE}/skills/install?slug={urllib.parse.quote(slug)}"
+        try:
+            info = api_get(url, headers=req_headers)
+        except SystemExit as e:
+            print(f"  ✗ {slug}: failed to fetch — {e}")
+            continue
+
+        latest_version = info["version"]
+        if latest_version == current_version:
+            print(f"  ✓ {slug}: already at latest {current_version}")
+            continue
+
+        print(f"  ↑ {slug}: {current_version} → {latest_version}")
+
+        # Re-install
+        class _FakeArgs:
+            pass
+
+        fake = _FakeArgs()
+        fake.slug = f"{slug}@{latest_version}"
+        fake.force = True
+        fake.client_mode = meta.get("client_mode", False)
+        fake.report_to = meta.get("report_to", None)
+        cmd_install(fake)
+        updated += 1
+
+    print(f"\nDone. {updated} skill(s) updated.")
+
+
+# ─── Subcommand: list ────────────────────────────────────────────────────────
+
+def cmd_list(args: argparse.Namespace) -> None:
+    if not SKILLS_DIR.exists():
+        print("No skills installed (skills dir not found).")
+        return
+
+    meta_files = sorted(SKILLS_DIR.rglob(".recipes-meta.json"))
+    if not meta_files:
+        print("No installed skills found.")
+        return
+
+    col_slug = 30
+    col_ver = 12
+    col_date = 28
+    header = (
+        f"{'Slug':<{col_slug}} {'Version':<{col_ver}} {'Installed At':<{col_date}} Source URL"
+    )
+    print(header)
+    print("─" * (col_slug + col_ver + col_date + 40))
+
+    for meta_path in meta_files:
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  [warn] could not read {meta_path}: {e}")
+            continue
+
+        slug = meta.get("slug", "?")
+        version = meta.get("version", "?")
+        installed_at = meta.get("installed_at", "?")
+        source_url = meta.get("source_url", "?")
+        print(f"{slug:<{col_slug}} {version:<{col_ver}} {installed_at:<{col_date}} {source_url}")
+
+
+# ─── Argument Parser ──────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="recipes",
+        description=(
+            "CLI for publishing and installing skills against recipes.wisechef.ai\n\n"
+            "Subcommands:\n"
+            "  init      Scaffold a new skill (skill.toml + SKILL.md)\n"
+            "  pack      Pack skill into a reproducible tar.gz\n"
+            "  publish   Sign + upload skill to recipes.wisechef.ai\n"
+            "  install   Download + verify + extract a skill\n"
+            "  update    Re-install skills that have newer versions\n"
+            "  list      Show all installed skills\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+    sub.required = True
+
+    # ── init ──
+    p_init = sub.add_parser("init", help="Scaffold a new skill directory")
+    p_init.add_argument("skill_name", metavar="<skill-name>", help="Human-readable skill name")
+
+    # ── pack ──
+    p_pack = sub.add_parser("pack", help="Pack skill into a reproducible tar.gz")
+    p_pack.add_argument(
+        "--out",
+        metavar="<file>",
+        default=None,
+        help="Output file (default: {name}-{version}.tar.gz)",
+    )
+
+    # ── publish ──
+    p_pub = sub.add_parser("publish", help="Publish skill to recipes.wisechef.ai")
+    p_pub.add_argument("--api-key", metavar="<key>", default=None, dest="api_key")
+    p_pub.add_argument(
+        "--private",
+        action="store_true",
+        help="Override is_public=false regardless of skill.toml",
+    )
+
+    # ── install ──
+    p_ins = sub.add_parser("install", help="Install a skill from recipes.wisechef.ai")
+    p_ins.add_argument("slug", metavar="<slug[@version]>", help="Skill slug (optionally @version)")
+    p_ins.add_argument(
+        "--client-mode",
+        action="store_true",
+        dest="client_mode",
+        help="Record skill as client-mode in meta",
+    )
+    p_ins.add_argument("--report-to", metavar="<url>", default=None, dest="report_to")
+    p_ins.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall even if already at requested version",
+    )
+
+    # ── update ──
+    p_upd = sub.add_parser("update", help="Update installed skills to latest versions")
+    p_upd.add_argument(
+        "slug",
+        metavar="<slug>",
+        nargs="?",
+        default=None,
+        help="Specific skill to update (default: all)",
+    )
+
+    # ── list ──
+    sub.add_parser("list", help="List all installed skills")
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    dispatch = {
+        "init": cmd_init,
+        "pack": cmd_pack,
+        "publish": cmd_publish,
+        "install": cmd_install,
+        "update": cmd_update,
+        "list": cmd_list,
+    }
+    dispatch[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
