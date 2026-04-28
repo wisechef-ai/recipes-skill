@@ -91,7 +91,7 @@ recipes telemetry emit \
   --no-intervention
 ```
 
-Reads `RECIPES_API_KEY` from env, posts to `${RECIPES_API_BASE}/api/telemetry`. Exit 0 on 201, exit 1 with stderr error message otherwise.
+Reads `RECIPES_API_KEY` from env, posts to `${RECIPES_API_BASE}/telemetry`. Exit 0 on 201, exit 1 with stderr error message otherwise.
 
 ---
 
