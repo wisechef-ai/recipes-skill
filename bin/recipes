@@ -375,24 +375,23 @@ def cmd_publish(args: argparse.Namespace) -> None:
 
         # Sign
         priv_key, pub_bytes = get_or_create_keypair(name)
-        signature = ed25519_sign(priv_key, tarball_bytes)
+        # Endpoint verifies signature over sha256(tarball).digest(), not
+        # tarball bytes directly. Match the contract.
+        tarball_sha256_digest = hashlib.sha256(tarball_bytes).digest()
+        signature = ed25519_sign(priv_key, tarball_sha256_digest)
 
-        pub_b64 = base64.b64encode(pub_bytes).decode()
-        sig_b64 = base64.b64encode(signature).decode()
-
+        # Endpoint expects skill_toml, tarball, signature, signing_pubkey ALL
+        # as multipart files (UploadFile), plus is_public + changelog as form fields.
+        toml_path = cwd / "skill.toml"
+        toml_bytes = toml_path.read_bytes()
         fields = {
-            "name": name,
-            "version": version,
-            "description": description,
-            "license": license_,
-            "tier": tier,
             "is_public": str(is_public).lower(),
-            "sha256": digest,
-            "public_key": pub_b64,
-            "signature": sig_b64,
         }
         files = {
+            "skill_toml": ("skill.toml", toml_bytes, "text/plain"),
             "tarball": (f"{name}-{version}.tar.gz", tarball_bytes, "application/gzip"),
+            "signature": ("signature.bin", signature, "application/octet-stream"),
+            "signing_pubkey": ("pubkey.bin", pub_bytes, "application/octet-stream"),
         }
         headers = {"x-api-key": api_key}
 
@@ -434,7 +433,10 @@ def cmd_install(args: argparse.Namespace) -> None:
     remote_slug: str = info["slug"]
     remote_version: str = info["version"]
     tarball_url: str = info["tarball_url"]
-    remote_sha256: str = info["sha256"]
+    # Endpoint field is checksum_sha256 (with sha256 as a legacy alias)
+    remote_sha256: str | None = info.get("checksum_sha256") or info.get("sha256")
+    if not remote_sha256:
+        sys.exit(f"Install response missing checksum_sha256: {info}")
     manifest: dict = info.get("manifest", {})
     category: str = manifest.get("category", "general")
 
