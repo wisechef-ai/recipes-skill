@@ -642,3 +642,79 @@ def test_install_uses_skill_toml_category(tmp_path):
         mod.API_BASE = original_api
         mod.SKILLS_DIR = original_skills
         srv.shutdown()
+
+
+# ─── Test 12: manifest.category takes priority over skill.toml category ────────
+
+def test_install_manifest_category_takes_priority(tmp_path):
+    """manifest.category from the install response must take priority over
+    [skill].category in the tarball's skill.toml (priority order per F-CLI-03)."""
+    # skill.toml says devops, but manifest says infra — manifest wins
+    skill_toml_content = (
+        b"[skill]\n"
+        b'name = "infra-tool"\n'
+        b'version = "1.0.0"\n'
+        b'category = "devops"\n'  # would put it in devops/ if manifest absent
+        b'description = "A skill"\n'
+        b'license = "MIT"\n'
+        b'entrypoint = "SKILL.md"\n'
+        b'tier = "cook"\n'
+        b'is_public = false\n'
+    )
+    tarball_content = make_deterministic_tarball({
+        "SKILL.md": b"# infra-tool\n",
+        "skill.toml": skill_toml_content,
+    })
+    good_sha = sha256(tarball_content)
+
+    install_meta = {
+        "slug": "infra-tool",
+        "version": "1.0.0",
+        "tarball_url": "__TARBALL_URL__",
+        "checksum_sha256": good_sha,
+        "manifest": {"category": "infra"},  # server says infra
+    }
+
+    routes: dict = {}
+    srv = RecordingServer(routes)
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    install_meta["tarball_url"] = f"{base}/tarball/infra-tool-1.0.0.tar.gz"
+
+    routes[("GET", "/skills/install")] = (200, {}, install_meta)
+    routes[("GET", "/tarball/infra-tool-1.0.0.tar.gz")] = (200, {}, tarball_content)
+
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    mod = load_cli_module("recipes_cli_test12")
+    skills_dir = tmp_path / "hermes_skills"
+    original_api = mod.API_BASE
+    original_skills = mod.SKILLS_DIR
+    mod.API_BASE = base
+    mod.SKILLS_DIR = skills_dir
+
+    try:
+        class FakeArgs:
+            slug = "infra-tool"
+            force = False
+            client_mode = False
+            report_to = None
+
+        mod.cmd_install(FakeArgs())
+
+        # manifest.category="infra" wins over skill.toml category="devops"
+        infra_path = skills_dir / "infra" / "infra-tool" / ".recipes-meta.json"
+        devops_path = skills_dir / "devops" / "infra-tool" / ".recipes-meta.json"
+
+        assert infra_path.exists(), (
+            f"Expected install under infra/ but not found at {infra_path}"
+        )
+        assert not devops_path.exists(), (
+            "Skill landed under devops/ — manifest.category was not respected"
+        )
+
+    finally:
+        mod.API_BASE = original_api
+        mod.SKILLS_DIR = original_skills
+        srv.shutdown()
