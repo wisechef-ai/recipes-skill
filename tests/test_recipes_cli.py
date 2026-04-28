@@ -418,7 +418,7 @@ def test_list_reads_meta(tmp_path, monkeypatch):
 # ─── Test 9: publish (mocked) sends expected multipart fields ─────────────────
 
 def test_publish_dryrun_fields(tmp_path):
-    """publish should POST multipart with name, version, sha256, public_key, signature."""
+    """publish should POST multipart with skill_toml, tarball, signature, signing_pubkey files + is_public field."""
     received: list[tuple] = []
 
     class CaptureHandler(http.server.BaseHTTPRequestHandler):
@@ -480,12 +480,17 @@ def test_publish_dryrun_fields(tmp_path):
         assert "multipart/form-data" in content_type
 
         body_str = body.decode("latin-1")
-        assert "name" in body_str
-        assert "test-pub-skill" in body_str
-        assert "sha256" in body_str
-        assert "public_key" in body_str
-        assert "signature" in body_str
-        assert "version" in body_str
+        # Assert actual multipart file fields (current wire format per commit cdf5c80)
+        assert "skill_toml" in body_str, "missing 'skill_toml' file part"
+        assert "tarball" in body_str, "missing 'tarball' file part"
+        assert "signature" in body_str, "missing 'signature' file part"
+        assert "signing_pubkey" in body_str, "missing 'signing_pubkey' file part"
+        assert "is_public" in body_str, "missing 'is_public' form field"
+        assert "test-pub-skill" in body_str, "skill name not present in body"
+        # Old fields (name/version/sha256/public_key as separate form fields) are gone
+        assert "sha256" not in body_str.split("test-pub-skill")[0], (
+            "'sha256' should not appear as a standalone form field"
+        )
 
         # CLI should have printed version and URL
         assert "0.1.0" in output
