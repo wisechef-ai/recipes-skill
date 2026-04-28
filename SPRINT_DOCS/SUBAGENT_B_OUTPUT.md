@@ -84,22 +84,18 @@ Pack → ed25519-sign → multipart-POST to
 - First publish: generates ed25519 keypair, stores private key at
   `~/.recipes/keys/{slug}.priv` (mode `0600`)
 - Subsequent publishes: reuses existing key
-- Public key included in upload (base64-encoded raw bytes)
-- Signature over tarball bytes, also base64-encoded
+- Public key sent as raw 32-byte binary (file upload, `signing_pubkey`)
+- Signature over `sha256(tarball).digest()` as raw 64-byte binary (file upload, `signature`)
 
 **Multipart POST fields sent:**
-| Field        | Value                              |
-|--------------|------------------------------------|
-| `name`       | skill name from toml               |
-| `version`    | skill version                      |
-| `description`| from toml                          |
-| `license`    | from toml                          |
-| `tier`       | from toml                          |
-| `is_public`  | `true`/`false`                     |
-| `sha256`     | hex digest of tarball              |
-| `public_key` | base64(raw ed25519 pubkey, 32 bytes)|
-| `signature`  | base64(ed25519 signature, 64 bytes) |
-| `tarball`    | file upload (`application/gzip`)   |
+
+| Part           | Kind        | Content-Type              | Description                                 |
+|----------------|-------------|---------------------------|---------------------------------------------|
+| `skill_toml`   | file upload | `text/plain`              | Raw bytes of `skill.toml`                   |
+| `tarball`      | file upload | `application/gzip`        | Packed `.tar.gz` of the skill directory     |
+| `signature`    | file upload | `application/octet-stream`| ed25519 signature over `sha256(tarball).digest()` (64 raw bytes) |
+| `signing_pubkey` | file upload | `application/octet-stream` | ed25519 public key (32 raw bytes)         |
+| `is_public`    | form field  | —                         | `"true"` or `"false"`                       |
 
 **Expected API response shape (being built in parallel by Subagent A):**
 ```json
