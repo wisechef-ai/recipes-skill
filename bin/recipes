@@ -577,6 +577,114 @@ def cmd_update(args: argparse.Namespace) -> None:
     print(f"\nDone. {updated} skill(s) updated.")
 
 
+# ─── Subcommand: telemetry emit ──────────────────────────────────────────────
+
+_VALID_TELEMETRY_EVENTS = frozenset(
+    {"install", "first_use", "task_completed", "task_failed", "replaced"}
+)
+_AGENT_HASH_RE = None  # lazy-compiled
+
+
+def _agent_hash_re():
+    global _AGENT_HASH_RE
+    if _AGENT_HASH_RE is None:
+        import re
+        _AGENT_HASH_RE = re.compile(r"^[a-f0-9]{8,64}$")
+    return _AGENT_HASH_RE
+
+
+def cmd_telemetry_emit(args: argparse.Namespace) -> None:
+    """POST a typed telemetry event to the recipes API."""
+    # ── Env checks ──────────────────────────────────────────────────────────
+    api_key = os.environ.get("RECIPES_API_KEY", "")
+    if not api_key:
+        print(
+            "Error: RECIPES_API_KEY env var is required for telemetry emit.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    base = os.environ.get("RECIPES_API_BASE", API_BASE)
+    url = f"{base}/telemetry"
+
+    # ── Client-side validation ───────────────────────────────────────────────
+    if args.event not in _VALID_TELEMETRY_EVENTS:
+        print(
+            f"Error: invalid event type '{args.event}'. "
+            f"Must be one of: {', '.join(sorted(_VALID_TELEMETRY_EVENTS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.duration is not None and not (0 <= args.duration <= 86400):
+        print(
+            f"Error: --duration must be between 0 and 86400 (got {args.duration}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.agent_hash is not None and not _agent_hash_re().match(args.agent_hash):
+        print(
+            "Error: --agent-hash must match ^[a-f0-9]{8,64}$ (lowercase hex, 8-64 chars).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ── Build payload ────────────────────────────────────────────────────────
+    payload: dict = {
+        "event_type": args.event,
+        "skill_slug": args.skill,
+        "retry_count": args.retries,
+        "user_intervention": args.intervention,
+    }
+    if args.goal_class is not None:
+        payload["goal_class"] = args.goal_class
+    if args.duration is not None:
+        payload["duration_seconds"] = args.duration
+    if args.agent_hash is not None:
+        payload["agent_class_hash"] = args.agent_hash
+
+    # ── POST ─────────────────────────────────────────────────────────────────
+    body_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body_bytes, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Length", str(len(body_bytes)))
+    req.add_header("User-Agent", "recipes-cli/0.1.0 (+https://recipes.wisechef.ai)")
+    req.add_header("x-api-key", api_key)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            resp_body = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        print(f"Error: HTTP {e.code} from {url}: {err_body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Error: network error reaching {url}: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    if status != 201:
+        print(
+            f"Error: expected HTTP 201 but got {status}: {resp_body}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    event_id = resp_body.get("event_id", "")
+    print(event_id)
+
+
+def cmd_telemetry(args: argparse.Namespace) -> None:
+    """Dispatcher for 'recipes telemetry <subcommand>'."""
+    sub = getattr(args, "telemetry_command", None)
+    if sub == "emit":
+        cmd_telemetry_emit(args)
+    else:
+        print(f"Unknown telemetry subcommand: {sub}", file=sys.stderr)
+        sys.exit(1)
+
+
 # ─── Subcommand: list ────────────────────────────────────────────────────────
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -684,6 +792,69 @@ def build_parser() -> argparse.ArgumentParser:
     # ── list ──
     sub.add_parser("list", help="List all installed skills")
 
+    # ── telemetry ──
+    p_tel = sub.add_parser("telemetry", help="Telemetry commands")
+    tel_sub = p_tel.add_subparsers(
+        dest="telemetry_command", metavar="<subcommand>"
+    )
+    tel_sub.required = True
+
+    p_emit = tel_sub.add_parser("emit", help="Post a typed telemetry event to the recipes API")
+    p_emit.add_argument(
+        "--skill",
+        required=True,
+        metavar="<slug>",
+        help="Skill slug (required)",
+    )
+    p_emit.add_argument(
+        "--event",
+        required=True,
+        metavar="<event_type>",
+        dest="event",
+        help="Event type: install, first_use, task_completed, task_failed, replaced",
+    )
+    p_emit.add_argument(
+        "--goal-class",
+        metavar="<class>",
+        default=None,
+        dest="goal_class",
+        help="Goal class (optional)",
+    )
+    p_emit.add_argument(
+        "--duration",
+        type=int,
+        metavar="<seconds>",
+        default=None,
+        help="Duration in seconds (0-86400, optional)",
+    )
+    p_emit.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        metavar="<n>",
+        help="Retry count (default 0)",
+    )
+    p_emit.add_argument(
+        "--intervention",
+        dest="intervention",
+        action="store_true",
+        default=False,
+        help="Flag that a human intervention occurred",
+    )
+    p_emit.add_argument(
+        "--no-intervention",
+        dest="intervention",
+        action="store_false",
+        help="No human intervention (default)",
+    )
+    p_emit.add_argument(
+        "--agent-hash",
+        metavar="<hex>",
+        default=None,
+        dest="agent_hash",
+        help="Agent class hash (hex, 8-64 chars, optional)",
+    )
+
     return parser
 
 
@@ -698,6 +869,7 @@ def main() -> None:
         "install": cmd_install,
         "update": cmd_update,
         "list": cmd_list,
+        "telemetry": cmd_telemetry,
     }
     dispatch[args.command](args)
 
