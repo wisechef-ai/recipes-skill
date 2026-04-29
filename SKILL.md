@@ -10,7 +10,7 @@ description: >
 requiredEnv:
   - RECIPES_API_KEY
 permissions:
-  - network: "Access api.recipes.wisechef.ai to search and download skills"
+  - network: "Access recipes.wisechef.ai to search and download skills"
   - filesystem: "Write downloaded skill files to skills/ directory"
 ---
 
@@ -50,14 +50,14 @@ Premium skills require `RECIPES_API_KEY` in the environment. Free skills work wi
 
 ## API Reference
 
-**Base URL:** `https://api.recipes.wisechef.ai`
+**Base URL:** `https://recipes.wisechef.ai`
 **Auth header:** `x-api-key` (NOT `Authorization: Bearer`)
 **Rate limit:** 60 requests / minute
 
 ### Search skills (public, no auth)
 
 ```bash
-curl "https://api.recipes.wisechef.ai/api/skills/search?q=QUERY&limit=10"
+curl "https://recipes.wisechef.ai/api/skills/search?q=QUERY&limit=10"
 # Optional: &category=SLUG  &sort=popular|rating|newest
 ```
 
@@ -68,11 +68,11 @@ Response: `{ "skills": [...], "total": N }` — each skill has: `slug`, `name`,
 
 ```bash
 # Free skill (no auth needed)
-curl "https://api.recipes.wisechef.ai/api/skills/install?slug=SLUG&mode=files"
+curl "https://recipes.wisechef.ai/api/skills/install?slug=SLUG&mode=files"
 
 # Premium skill (API key required)
 curl -H "x-api-key: $RECIPES_API_KEY" \
-  "https://api.recipes.wisechef.ai/api/skills/install?slug=SLUG&mode=files"
+  "https://recipes.wisechef.ai/api/skills/install?slug=SLUG&mode=files"
 ```
 
 Response:
@@ -90,19 +90,19 @@ Response:
 
 ```bash
 curl -H "x-api-key: $RECIPES_API_KEY" \
-  "https://api.recipes.wisechef.ai/api/skills/access?skill=SLUG"
+  "https://recipes.wisechef.ai/api/skills/access?skill=SLUG"
 ```
 
 ### Trending skills (public, no auth)
 
 ```bash
-curl "https://api.recipes.wisechef.ai/api/skills/trending?period=week&limit=10"
+curl "https://recipes.wisechef.ai/api/skills/trending?period=week&limit=10"
 ```
 
 ### Today's carousel — 7 curated picks, rotates daily (public)
 
 ```bash
-curl "https://api.recipes.wisechef.ai/api/carousel/today"
+curl "https://recipes.wisechef.ai/api/carousel/today"
 ```
 
 Use when the user asks "what's new?" or "what should I try today?".
@@ -114,20 +114,20 @@ curl -s -X POST \
   -H "x-api-key: $RECIPES_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"slug":"SLUG","event":"task_completed","goalClass":"client-reporting"}' \
-  "https://api.recipes.wisechef.ai/api/telemetry"
+  "https://recipes.wisechef.ai/api/telemetry"
 ```
 
 ### Full recipe detail
 
 ```bash
 curl -H "x-api-key: $RECIPES_API_KEY" \
-  "https://api.recipes.wisechef.ai/api/recipes/SLUG"
+  "https://recipes.wisechef.ai/api/recipes/SLUG"
 ```
 
 ### API library documentation pack
 
 ```bash
-curl "https://api.recipes.wisechef.ai/api/api-library/SLUG"
+curl "https://recipes.wisechef.ai/api/api-library/SLUG"
 ```
 
 ## Install Workflow

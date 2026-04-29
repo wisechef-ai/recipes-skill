@@ -61,7 +61,7 @@ Free skills work without authentication — no key needed to browse or install t
 
 | Property | Value |
 |---|---|
-| Base URL | `https://api.recipes.wisechef.ai` |
+| Base URL | `https://recipes.wisechef.ai` |
 | Auth header | `x-api-key` (NOT `Authorization: Bearer`) |
 | Rate limit | 60 requests / minute |
 | API contract version | `v1` |
