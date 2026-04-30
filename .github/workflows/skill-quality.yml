@@ -25,19 +25,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Fetch quality-gate script
-        run: |
-          mkdir -p .ci
-          curl -fsSL \
-            "https://raw.githubusercontent.com/wisechef-ai/recipes-api/main/scripts/skill_quality_gate.py" \
-            -o .ci/skill_quality_gate.py
-          chmod +x .ci/skill_quality_gate.py
-
       - name: Run quality gate (publish mode, JSON output)
         id: gate
         run: |
           set +e
-          python .ci/skill_quality_gate.py . --publish --json > gate_report.json
+          python .github/skill_quality_gate.py . --publish --json > gate_report.json
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 
@@ -52,7 +44,7 @@ jobs:
       - name: Print human-readable summary
         if: always()
         run: |
-          python .ci/skill_quality_gate.py . --publish || true
+          python .github/skill_quality_gate.py . --publish || true
 
       - name: PR comment with findings
         if: github.event_name == 'pull_request' && always()
