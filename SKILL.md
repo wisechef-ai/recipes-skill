@@ -93,96 +93,106 @@ curl -H "x-api-key: $RECIPES_API_KEY" \
   "https://recipes.wisechef.ai/api/skills/access?skill=SLUG"
 ```
 
-### Trending skills (public, no auth)
+### Trending (public) | Today's carousel (public) | Telemetry | Full recipe | API library
 
 ```bash
 curl "https://recipes.wisechef.ai/api/skills/trending?period=week&limit=10"
-```
-
-### Today's carousel — 7 curated picks, rotates daily (public)
-
-```bash
 curl "https://recipes.wisechef.ai/api/carousel/today"
-```
-
-Use when the user asks "what's new?" or "what should I try today?".
-
-### Report telemetry (optional — improves recommendations)
-
-```bash
-curl -s -X POST \
-  -H "x-api-key: $RECIPES_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"slug":"SLUG","event":"task_completed","goalClass":"client-reporting"}' \
+curl -X POST -H "x-api-key: $RECIPES_API_KEY" -H "Content-Type: application/json" \
+  -d '{"slug":"SLUG","event":"task_completed"}' \
   "https://recipes.wisechef.ai/api/telemetry"
-```
-
-### Full recipe detail
-
-```bash
-curl -H "x-api-key: $RECIPES_API_KEY" \
-  "https://recipes.wisechef.ai/api/recipes/SLUG"
-```
-
-### API library documentation pack
-
-```bash
+curl -H "x-api-key: $RECIPES_API_KEY" "https://recipes.wisechef.ai/api/recipes/SLUG"
 curl "https://recipes.wisechef.ai/api/api-library/SLUG"
 ```
 
-## Install Workflow
+## Install workflow
 
-After a successful install response:
+1. `curl ?mode=files` → response has `files: [{path, content}]`
+2. Write each file under `skills/{slug}/` (create subdirs)
+3. Write `skills/{slug}/_meta.json` = `{source:"recipes", slug, installedAt}`
+4. Read `skills/{slug}/SKILL.md` and execute its instructions immediately
 
-1. Create directory `skills/{slug}/`
-2. Write every file from the `files` array (create subdirectories as needed)
-3. Write `skills/{slug}/_meta.json`:
-   ```json
-   { "source": "recipes", "slug": "SLUG", "installedAt": "ISO-8601-timestamp" }
-   ```
-4. Read `skills/{slug}/SKILL.md`
-5. Follow the skill's instructions immediately — do not wait for the user to ask again
+## Critical rules
 
-## Critical Rules
+- Always pass `mode=files` on install
+- 403 → tell user to subscribe at /signin · 401 → check API key · 429 → back off (60 req/min)
+- Show skill cards: name, one-line desc, free/premium, rating, install count, link
+- Browse by category: `?category=SLUG` · or by vertical (below)
+## Verticals
 
-- Use `mode=files` when installing — never omit this parameter
-- Write `_meta.json` for every installed skill — it enables updates and telemetry
-- Execute the installed skill immediately after reading it — do not skip this step
-- **403 response:** tell the user "This skill requires a Recipes subscription.
-  Subscribe at https://recipes.wisechef.ai/signin"
-- **401 response:** the API key is invalid or missing — prompt the user to check it
-- **429 response:** rate limited (60 req/min) — back off and retry
+Six verticals: marketing, code, web-scraping, ops, sales, sim-robotics.
+Filter by vertical: `GET /api/skills/search?vertical=VERTICAL&page_size=50`.
 
-## Presenting Skills
+## Operator-tier commands (subscription_tier in [operator, studio])
 
-When showing skills to a user:
+### `recipes fork <slug>`
+Fork a public skill into your private library.
+```
+POST /api/forks/create  {source_slug, name, readme?}
+→ 201 {id, slug, source_slug, ...}
+```
+402 if Cook-tier; upgrade required.
 
-- Link to the skill page: `https://recipes.wisechef.ai/skills/{slug}`
-- Show: name, one-line description, free vs premium, rating, install count
-- Browse by category: `GET /api/skills/search?category=CATEGORY&limit=20`
+### `recipes publish-fork <name> [--bump=patch|minor|major]`
+Tarball the local fork directory and push a new version.
+```
+POST /api/forks/<id>/version (multipart: tarball, semver, changelog)
+→ 201 {id, semver, checksum_sha256, tarball_size_bytes}
+```
 
-## Categories
+### `recipes install-fork <name> [--into=<dir>]`
+Install the latest version of your fork (HMAC-signed URL, 5-min TTL).
+```
+GET /api/forks/<id>/install → {tarball_url, checksum_sha256, expires_at}
+```
 
-agency, analytics, automation, code-review, content, data, design, dev-tools,
-finance, marketing, productivity, robotics, seo, simulation, writing
+`recipes list` shows a "Your forks" section. `recipes search` tags fork
+results with `[fork]`.
 
-## Publishing Skills
+## Studio-tier commands (subscription_tier == studio)
 
-Anyone with a Recipes subscription and a connected GitHub account can publish:
+### `recipes apply bucket://<slug>`
+Atomic install of an entire bucket (skills + crons + services) on the host.
 
-1. Build your skill locally (SKILL.md + any supporting files)
-2. Push to a public GitHub repo
-3. Submit at https://recipes.wisechef.ai/publish
-4. Automated security scan runs, then human review before approval
-5. Approved skills appear in search; usage-attributed revenue share on paid installs
+```
+GET /api/buckets/<slug>/preflight   → arch / port / env-var conflict report
+POST /api/buckets/<id>/apply        → job_id; install_events with bucket_id
+GET  /api/buckets/<id>/jobs/<job_id>→ progress poll
+```
+
+Re-apply is idempotent — only installs what's missing. Reports e.g.
+`45/47 skills, 12/12 crons, 6/6 services healthy in 87s`.
+
+White-label: a Studio bucket with `custom_domain` set serves a scoped
+catalog at that CNAME (Caddy + `BucketHostMiddleware`).
+
+## Auto-improve telemetry (opt-in for free tier, opt-out for paid)
+
+Each skill invocation can be wrapped by `recipes-auto-improve`. On failure:
+
+- captures stack-trace top frames (sha256 normalized)
+- env fingerprint (os/arch/cuda/ram_gb/skill_version)
+- POSTs to `/api/feedback/incident` with the user's API key
+- NO $HOME paths, NO env values, NO file content (regex-audited at the wire)
+
+Server clusters reports across the fleet, drafts patches, runs canary
+rollouts. Public payload examples + transparency log at
+`https://recipes.wisechef.ai/docs/auto-improve-telemetry`.
+
+## Single-publisher catalog
+
+Recipes is curated by WiseChef. We don't take submissions — we take
+**requests**. Tell us what's broken in your fleet and we'll ship a skill
+that fixes it: `https://recipes.wisechef.ai/request-skill`.
 
 ## Security
 
-- All skills are human-reviewed and security-scanned before publication
-- Skills are fully transparent — plain text, inspectable by anyone
+- All skills are reviewed before publication
+- Skills are plain text, inspectable by anyone
 - User credentials stay on the user's machine and are never sent to Recipes
 - Recipes only serves skill files; the agent talks directly to third-party APIs
 
 ---
 
-*Powered by [WiseChef](https://wisechef.ai) — AI employees for marketing agencies.*
+*Production infrastructure for teams running AI in production.*
+*Powered by [WiseChef](https://wisechef.ai).*
