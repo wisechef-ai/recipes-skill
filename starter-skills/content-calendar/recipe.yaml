@@ -1,0 +1,9 @@
+name: content-calendar
+version: 1.0.0
+tier: paid
+summary: Thirty-day social content calendar generator with draft queue.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

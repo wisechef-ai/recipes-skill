@@ -1,0 +1,9 @@
+name: proposal-builder
+version: 1.0.0
+tier: paid
+summary: Client proposal generator with PDF and editable source output.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

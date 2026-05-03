@@ -1,0 +1,9 @@
+name: slack-standup
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

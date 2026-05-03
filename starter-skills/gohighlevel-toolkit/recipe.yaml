@@ -1,0 +1,9 @@
+name: gohighlevel-toolkit
+version: 1.0.0
+tier: paid
+summary: Wrapper toolkit for the operator's marketing automation suite.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

@@ -1,0 +1,9 @@
+name: seo-audit
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

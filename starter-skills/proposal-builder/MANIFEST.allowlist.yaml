@@ -1,0 +1,9 @@
+name: proposal-builder
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

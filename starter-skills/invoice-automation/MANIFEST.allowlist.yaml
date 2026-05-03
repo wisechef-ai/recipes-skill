@@ -1,0 +1,9 @@
+name: invoice-automation
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

@@ -1,0 +1,9 @@
+name: recipes-skill
+version: 1.0.0
+tier: free
+summary: Entry meta-skill — gives an agent marketplace awareness.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

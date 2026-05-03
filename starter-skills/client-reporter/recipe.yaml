@@ -1,0 +1,9 @@
+name: client-reporter
+version: 1.0.0
+tier: free
+summary: Branded white-label client report — multi-platform marketing metrics.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

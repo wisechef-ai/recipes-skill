@@ -1,0 +1,9 @@
+name: invoice-automation
+version: 1.0.0
+tier: paid
+summary: Recurring client invoice generator wired to billing providers.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

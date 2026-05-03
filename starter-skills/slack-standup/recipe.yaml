@@ -1,0 +1,9 @@
+name: slack-standup
+version: 1.0.0
+tier: paid
+summary: Async daily standup runner for team chat.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

@@ -1,0 +1,9 @@
+name: client-onboarding
+version: 1.0.0
+tier: paid
+summary: Async kickoff wizard that collects access, assets, and goals.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported
