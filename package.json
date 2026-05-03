@@ -1,0 +1,42 @@
+{
+  "name": "@wisechef/recipes",
+  "version": "1.0.0",
+  "description": "Meta-skill for AI agents — install once, your agent gains marketplace awareness across Hermes, Claude Code, Codex, OpenClaw.",
+  "license": "Apache-2.0",
+  "homepage": "https://recipes.wisechef.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wisechef-ai/recipes-skill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wisechef-ai/recipes-skill/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "skill",
+    "claude-code",
+    "codex",
+    "openclaw",
+    "hermes",
+    "wisechef",
+    "recipes"
+  ],
+  "bin": {
+    "recipes": "bin/recipes.js"
+  },
+  "files": [
+    "bin/recipes",
+    "bin/recipes.js",
+    "scripts/install-skill.js",
+    "SKILL.md",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install-skill.js",
+    "test": "node scripts/install-skill.js --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

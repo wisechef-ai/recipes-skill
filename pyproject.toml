@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wisechef-recipes"
+version = "1.0.0"
+description = "Meta-skill for AI agents — install once, your agent gains marketplace awareness across Hermes, Claude Code, Codex, OpenClaw."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [
+  { name = "WiseChef", email = "team@wisechef.ai" }
+]
+keywords = [
+  "ai-agent", "skill", "claude-code", "codex", "openclaw", "hermes", "wisechef", "recipes"
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://recipes.wisechef.ai"
+Repository = "https://github.com/wisechef-ai/recipes-skill"
+Issues = "https://github.com/wisechef-ai/recipes-skill/issues"
+
+[project.scripts]
+recipes = "recipes_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recipes_cli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"bin/recipes" = "recipes_cli/_main.py"
+"SKILL.md" = "recipes_cli/SKILL.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/bin/recipes",
+  "/SKILL.md",
+  "/README.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
