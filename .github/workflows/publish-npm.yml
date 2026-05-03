@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish @wisechef/recipes to npm
+    name: Publish wisechef-recipes to npm
     runs-on: ubuntu-latest
     permissions:
       contents: read
