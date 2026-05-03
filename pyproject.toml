@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wisechef-recipes"
-version = "1.0.0"
+version = "1.0.1"
 description = "Meta-skill for AI agents — install once, your agent gains marketplace awareness across Hermes, Claude Code, Codex, OpenClaw."
 readme = "README.md"
 license = { text = "Apache-2.0" }
