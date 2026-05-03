@@ -517,6 +517,58 @@ def cmd_install(args: argparse.Namespace) -> None:
     print(f"Installed {remote_slug}@{remote_version} at {install_dir}")
 
 
+# ─── Subcommand: verify ───────────────────────────────────────────────────────
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    """Fetch the manifest for `slug`, download the tarball, verify sha256, and
+    print the source URL + signature status. Exit non-zero on mismatch."""
+    slug: str = args.slug
+    if "@" in slug:
+        slug, version = slug.rsplit("@", 1)
+    else:
+        version = None
+
+    api_key = os.environ.get("RECIPES_API_KEY", "")
+    req_headers: dict[str, str] = {}
+    if api_key:
+        req_headers["x-api-key"] = api_key
+
+    url = f"{API_BASE}/skills/install?slug={urllib.parse.quote(slug)}"
+    if version:
+        url += f"&version={urllib.parse.quote(version)}"
+
+    print(f"Fetching manifest for {slug} ...")
+    info = api_get(url, headers=req_headers)
+
+    remote_slug: str = info.get("slug", slug)
+    remote_version: str = info.get("version", "?")
+    tarball_url: str = info.get("tarball_url", "")
+    expected_sha: str | None = info.get("checksum_sha256") or info.get("sha256")
+    source_url: str = info.get("source_url", "") or info.get("repo_url", "") or tarball_url
+    signature: str | None = info.get("signature") or info.get("ed25519_signature")
+
+    if not tarball_url:
+        sys.exit(f"Manifest for {slug} is missing tarball_url")
+    if not expected_sha:
+        sys.exit(f"Manifest for {slug} is missing checksum_sha256")
+
+    print(f"Downloading {tarball_url} ...")
+    tarball_bytes = api_download(tarball_url, headers=req_headers)
+    actual_sha = sha256_bytes(tarball_bytes)
+
+    if actual_sha != expected_sha:
+        sys.exit(
+            f"sha256 mismatch for {remote_slug}@{remote_version}!\n"
+            f"  expected: {expected_sha}\n"
+            f"  got:      {actual_sha}"
+        )
+
+    print(f"✓ {remote_slug}@{remote_version} sha256 verified: {actual_sha}")
+    print(f"  source: {source_url}")
+    print(f"  signature: {'present (' + signature[:16] + '…)' if signature else 'unsigned'}")
+    print("OK")
+
+
 # ─── Subcommand: update ───────────────────────────────────────────────────────
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -779,6 +831,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reinstall even if already at requested version",
     )
 
+    # ── verify ──
+    p_ver = sub.add_parser("verify", help="Verify a skill's tarball matches its manifest sha256")
+    p_ver.add_argument("slug", metavar="<slug[@version]>", help="Skill slug (optionally @version)")
+
     # ── update ──
     p_upd = sub.add_parser("update", help="Update installed skills to latest versions")
     p_upd.add_argument(
@@ -867,6 +923,7 @@ def main() -> None:
         "pack": cmd_pack,
         "publish": cmd_publish,
         "install": cmd_install,
+        "verify": cmd_verify,
         "update": cmd_update,
         "list": cmd_list,
         "telemetry": cmd_telemetry,
