@@ -17,7 +17,6 @@ jobs:
   publish:
     name: Publish wisechef-recipes to PyPI
     runs-on: ubuntu-latest
-    environment: pypi-publish
     steps:
       - uses: actions/checkout@v4
         with:
