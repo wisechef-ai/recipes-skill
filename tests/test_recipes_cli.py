@@ -718,3 +718,89 @@ def test_install_manifest_category_takes_priority(tmp_path):
         mod.API_BASE = original_api
         mod.SKILLS_DIR = original_skills
         srv.shutdown()
+
+
+# ─── Test 13: verify subcommand — happy path ──────────────────────────────────
+
+def test_verify_succeeds_when_sha256_matches(tmp_path, capsys):
+    """verify should fetch manifest, download tarball, sha256-match, print source."""
+    tarball_content = make_deterministic_tarball({
+        "SKILL.md": b"# verify-target\n",
+        "skill.toml": b'[skill]\nname = "verify-target"\nversion = "1.0.0"\n',
+    })
+    good_sha = sha256(tarball_content)
+
+    routes: dict = {}
+    srv = RecordingServer(routes)
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    tarball_url = f"{base}/tarball/verify-target-1.0.0.tar.gz"
+
+    manifest = {
+        "slug": "verify-target",
+        "version": "1.0.0",
+        "tarball_url": tarball_url,
+        "checksum_sha256": good_sha,
+        "source_url": "https://github.com/wisechef-ai/awesome-agent-recipes/tree/main/skills/verify-target",
+    }
+    routes[("GET", "/skills/install")] = (200, {}, manifest)
+    routes[("GET", "/tarball/verify-target-1.0.0.tar.gz")] = (200, {}, tarball_content)
+
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    mod = load_cli_module("recipes_cli_test13a")
+    original_api = mod.API_BASE
+    mod.API_BASE = base
+    try:
+        class FakeArgs:
+            slug = "verify-target"
+
+        mod.cmd_verify(FakeArgs())  # should not raise
+        out = capsys.readouterr().out.lower()
+        assert "verified" in out or "ok" in out
+        assert good_sha in out
+        assert "github.com" in out
+    finally:
+        mod.API_BASE = original_api
+        srv.shutdown()
+
+
+def test_verify_fails_on_sha_mismatch(tmp_path):
+    """verify must exit non-zero when sha256 disagrees with the manifest."""
+    tarball_content = make_deterministic_tarball({"SKILL.md": b"# x\n"})
+
+    routes: dict = {}
+    srv = RecordingServer(routes)
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    tarball_url = f"{base}/tarball/bad-skill-1.0.0.tar.gz"
+
+    manifest = {
+        "slug": "bad-skill",
+        "version": "1.0.0",
+        "tarball_url": tarball_url,
+        "checksum_sha256": "0" * 64,  # deliberately wrong
+        "source_url": "https://example.com/repo",
+    }
+    routes[("GET", "/skills/install")] = (200, {}, manifest)
+    routes[("GET", "/tarball/bad-skill-1.0.0.tar.gz")] = (200, {}, tarball_content)
+
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+
+    mod = load_cli_module("recipes_cli_test13b")
+    original_api = mod.API_BASE
+    mod.API_BASE = base
+    try:
+        class FakeArgs:
+            slug = "bad-skill"
+
+        with pytest.raises(SystemExit) as exc:
+            mod.cmd_verify(FakeArgs())
+        msg = str(exc.value).lower()
+        assert "mismatch" in msg or "sha256" in msg
+    finally:
+        mod.API_BASE = original_api
+        srv.shutdown()
+

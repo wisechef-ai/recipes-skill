@@ -1,0 +1,52 @@
+name: publish-npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish @wisechef/recipes to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify version match
+        run: |
+          set -e
+          ref="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          tag_version="${ref#v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::package.json version ($pkg_version) does not match tag ($tag_version)"
+            exit 1
+          fi
+          echo "✓ version $pkg_version matches tag $ref"
+
+      - name: Smoke-test postinstall script (dry-run)
+        run: node scripts/install-skill.js --dry-run
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
