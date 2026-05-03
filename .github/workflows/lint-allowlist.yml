@@ -1,0 +1,53 @@
+name: lint-allowlist
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "starter-skills/**"
+      - "scripts/allowlist_lint.py"
+      - ".github/workflows/lint-allowlist.yml"
+  pull_request:
+    paths:
+      - "starter-skills/**"
+      - "scripts/allowlist_lint.py"
+      - ".github/workflows/lint-allowlist.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-allowlist-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Allowlist PII linter (positive list)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Lint every starter skill
+        run: |
+          set -e
+          shopt -s nullglob
+          skills=(starter-skills/*/)
+          if [ ${#skills[@]} -eq 0 ]; then
+            echo "No starter skills found — nothing to lint."
+            exit 0
+          fi
+          python scripts/allowlist_lint.py "${skills[@]}" --json | tee allowlist-report.json
+          # exit code from the linter is what we care about
+          python scripts/allowlist_lint.py "${skills[@]}" >/dev/null
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allowlist-report
+          path: allowlist-report.json

@@ -1,0 +1,88 @@
+name: installer-matrix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "recipes-installer/**"
+      - ".github/workflows/installer-matrix.yml"
+  pull_request:
+    paths:
+      - "recipes-installer/**"
+      - ".github/workflows/installer-matrix.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ubuntu:
+    name: ubuntu-24.04 / ${{ matrix.runtime }} / agentpact=${{ matrix.agentpact }}
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [hermes, openclaw, byoa-codex, byoa-claudecode]
+        agentpact: ["off", "on"]
+    steps:
+      - name: Bootstrap container
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            bash ca-certificates curl git python3 ssh tmux jq
+
+      - uses: actions/checkout@v4
+
+      - name: Run installer dry-run
+        env:
+          RECIPES_DRY_RUN: "1"
+        run: |
+          extra=""
+          if [ "${{ matrix.agentpact }}" = "on" ]; then
+            extra="--with-agentpact"
+          fi
+          bash recipes-installer/install-fleet.sh \
+            --dry-run --non-interactive \
+            --runtime=${{ matrix.runtime }} $extra | tee dry-run.txt
+          grep -F "runtime=${{ matrix.runtime }}" dry-run.txt
+          grep -F "agentpact=${{ matrix.agentpact }}" dry-run.txt
+
+      - name: Real install (skipped — dry-run only in CI to keep <10 min)
+        run: |
+          echo "Real-install path covered by manual smoke on docker run ubuntu:24.04."
+          echo "Dry-run plan above is what the real installer would execute."
+
+      - name: AgentPact gating assertion
+        run: |
+          if [ "${{ matrix.agentpact }}" = "off" ]; then
+            if grep -F "agentpact=on" dry-run.txt; then
+              echo "FAIL: AgentPact appeared in plan despite no flag" >&2
+              exit 1
+            fi
+          fi
+
+  macos:
+    name: macos-14 / ${{ matrix.runtime }}
+    runs-on: macos-14
+    if: github.event_name == 'push'
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [hermes, openclaw, byoa-codex, byoa-claudecode]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer dry-run
+        env:
+          RECIPES_DRY_RUN: "1"
+        run: |
+          bash recipes-installer/install-fleet.sh \
+            --dry-run --non-interactive \
+            --runtime=${{ matrix.runtime }} | tee dry-run.txt
+          grep -F "runtime=${{ matrix.runtime }}" dry-run.txt
