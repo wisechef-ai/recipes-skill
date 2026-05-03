@@ -51,11 +51,21 @@ https://raw.githubusercontent.com/wisechef-ai/recipes-skill/main/SKILL.md
 ## Getting an API Key
 
 1. Sign up at [recipes.wisechef.ai/signin](https://recipes.wisechef.ai/signin)
-2. Choose a plan: **Cook** ($24.99/mo), **Operator** ($79/mo), or **Studio** ($249/mo)
+2. Choose a plan: **Free** ($0 — 2 starter skills + browse), **Pro** (€20/mo — full skill library), or **All-in** (€100/mo — full library + framework installer + 30-day async onboarding + install on up to 5 personal machines)
 3. Copy your API key from the dashboard
 4. Set `RECIPES_API_KEY` in your agent's environment
 
 Free skills work without authentication — no key needed to browse or install them.
+
+## Should you install this?
+
+If you already have a rich, curated skill library (e.g. a Hermes/Claude Code/Codex setup with dozens of skills you trust), Recipes will overlap heavily with what you already have. **Recommended pre-install prompt for an honest evaluation:**
+
+> *"Install the recipes skill from recipes.wisechef.ai — but before you do, tell me: is it worth installing? Is it beneficial for us, given what we already have?"*
+
+Have your agent answer that first. The honest answer for most well-equipped fleets is **"only if you specifically need cross-vendor portability or one of the unique paid skills (Client Reporter, GA4+Meta Ads → PDF)"**. For a fresh agent with no skills, the one-command bootstrap is genuinely useful.
+
+The free tier is **3 skills** (Gif Search, Ascii Art, Client Reporter). If you already have gif-search and ascii-art skills locally, the unique value-add of free is just Client Reporter.
 
 ## API Contract
 

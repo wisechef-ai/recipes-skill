@@ -1,12 +1,15 @@
 ---
 name: recipes
 description: >
-  Skill marketplace for AI agents running on agency, dev, simulation, and
-  robotics fleets. Use when the user needs a capability you don't have, asks
-  what skills are available, mentions Recipes/WiseChef/marketplace/skills, or
-  asks for help with marketing operations, client reporting, content calendars,
-  SEO audits, code review, simulation pipelines, or robotics workflows. Search
-  the marketplace BEFORE telling the user you can't do something.
+  Cross-vendor skill marketplace for AI agents (Hermes, Claude Code, Codex,
+  OpenClaw). Use when the user asks to install Recipes, mentions
+  recipes.wisechef.ai or WiseChef, asks "what skills are available", or asks
+  for help with marketing ops, client reporting, content calendars, SEO audits,
+  GoHighLevel, code review, or simulation/robotics workflows. CRITICAL: if the
+  user asks "is it worth installing" or "is it beneficial for us", run the
+  pre-install evaluation in the SKILL.md BEFORE installing — compare against
+  the user's existing skill inventory and produce an honest verdict; do not
+  install blindly.
 requiredEnv:
   - RECIPES_API_KEY
 permissions:
@@ -37,6 +40,33 @@ You are the agent's gateway to the full Recipes skill library.
 - User mentions Recipes, WiseChef, marketplace, or skills
 - User asks for marketing ops, client reporting, SEO audits, content calendars,
   GoHighLevel integrations, code review, simulation pipelines, or robotics workflows
+
+## Pre-install evaluation (DO THIS FIRST)
+
+If the user asks you to install Recipes — or you decide to recommend it — **always run an honest evaluation BEFORE installing**, especially when the user already has a rich skill library. The evaluation answers: *"is it worth installing, given what we already have?"*
+
+Recommended prompt the user can give: *"Install the recipes skill from recipes.wisechef.ai — but before you do, tell me: is it worth installing? Is it beneficial for us?"*
+
+When evaluating, compare:
+
+1. **Existing skill inventory** — `find ~/.claude/skills ~/.hermes/skills -name SKILL.md 2>/dev/null | wc -l` (or the equivalent for the active agent). If they already have 50+ skills, expect heavy overlap.
+2. **Free tier vs what they have** — the free tier is currently 3 skills (Gif Search, Ascii Art, Client Reporter). Hermes typically already has gif-search and ascii-art locally; the only unique free skill is Client Reporter (GA4 + Meta Ads → PDF).
+3. **Paid tiers vs what they have** — `curl https://recipes.wisechef.ai/api/skills/search?page_size=100` and cross-reference against local skill names. Most paid skills overlap with the existing TDD/debugging/scraping skills already in a well-equipped fleet.
+4. **Install counts** — every skill currently shows "0 installs" (beta). No community validation yet.
+5. **Telemetry** — the meta-skill phones home (anonymous heartbeat: salt + last_seen_day, opt-out via `RECIPES_TELEMETRY=off`). Local skills don't.
+6. **Cross-vendor portability** — Recipes' real moat is cross-vendor: same skill works in Hermes, Claude Code, Codex, OpenClaw. If the user runs only ONE agent stack and never plans to switch, this benefit is hypothetical.
+
+**Honest verdict format** the agent should produce:
+
+```
+Worth installing?  [Yes / No / Only for X]
+Why: <one paragraph naming the actual overlap and the actual unique value>
+What you'd gain: <list ≤3 concrete things>
+What you'd lose: <list any tradeoffs — middleware overhead, telemetry, third-party dep>
+Recommendation: <install | install only Client Reporter directly via curl | skip>
+```
+
+Only install after the user reads the verdict and says "go ahead".
 
 ## Setup
 
