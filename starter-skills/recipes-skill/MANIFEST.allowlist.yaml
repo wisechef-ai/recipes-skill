@@ -1,0 +1,9 @@
+name: recipes-skill
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

@@ -773,6 +773,142 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(f"{slug:<{col_slug}} {version:<{col_ver}} {installed_at:<{col_date}} {source_url}")
 
 
+# ─── Subcommand: capabilities ─────────────────────────────────────────────────
+
+def _detect_os() -> str:
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform == "darwin":
+        return "macos"
+    return "unknown"
+
+
+def _detect_pkg_mgr() -> str:
+    import shutil as _sh
+    for cand in ("brew", "apt-get", "dnf", "pacman"):
+        if _sh.which(cand):
+            return "apt" if cand == "apt-get" else cand
+    return "unknown"
+
+
+def _probe(tool: str) -> str:
+    import shutil as _sh
+    return "ok" if _sh.which(tool) else "missing"
+
+
+_PROBE_TOOLS = ("git", "python3", "node", "sqlite3", "jq", "ssh", "tmux", "docker", "curl", "claude")
+# Map normalized capability key → command name
+_PROBE_KEYS = {
+    "git": "git",
+    "python": "python3",
+    "node": "node",
+    "sqlite": "sqlite3",
+    "jq": "jq",
+    "ssh": "ssh",
+    "tmux": "tmux",
+    "docker": "docker",
+    "curl": "curl",
+    "claude-cli": "claude",
+}
+
+
+def cmd_capabilities(args: argparse.Namespace) -> None:
+    caps = {key: _probe(cmd) for key, cmd in _PROBE_KEYS.items()}
+    payload = {
+        "os": _detect_os(),
+        "pkg_mgr": _detect_pkg_mgr(),
+        "capabilities": caps,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return
+    print(f"os: {payload['os']}")
+    print(f"pkg_mgr: {payload['pkg_mgr']}")
+    print("capabilities:")
+    for key in sorted(caps):
+        mark = "✓" if caps[key] == "ok" else "✗"
+        print(f"  {mark} {key}")
+
+
+# ─── Subcommand: onboard ──────────────────────────────────────────────────────
+
+# Bundle definitions live in repo bundles/*.yaml but for the in-tree CLI we
+# keep a small mirror so the CLI works in a fresh install with no checkout.
+_BUNDLES = {
+    "starter-solo-operator": [
+        "client-reporter",
+        "cold-outreach",
+        "content-calendar",
+        "seo-audit",
+        "invoice-automation",
+    ],
+    "starter-fleet-operator": [
+        "recipes-skill",
+        "client-reporter",
+        "cold-outreach",
+        "content-calendar",
+        "seo-audit",
+        "proposal-builder",
+        "client-onboarding",
+        "invoice-automation",
+        "slack-standup",
+        "gohighlevel-toolkit",
+    ],
+}
+
+_GOAL_TO_BUNDLE = {
+    "solo": "starter-solo-operator",
+    "fleet": "starter-fleet-operator",
+}
+
+
+def _suggest_bundle_from_host() -> str:
+    """If docker + many tools are present, suggest the fleet bundle.
+    Otherwise fall back to the solo bundle."""
+    docker_ok = _probe("docker") == "ok"
+    tmux_ok = _probe("tmux") == "ok"
+    if docker_ok and tmux_ok:
+        return "starter-fleet-operator"
+    return "starter-solo-operator"
+
+
+def cmd_onboard(args: argparse.Namespace) -> None:
+    if args.goal is not None:
+        if args.goal not in _GOAL_TO_BUNDLE:
+            print(
+                f"recipes onboard: unknown goal '{args.goal}' (expected: solo, fleet)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        bundle = _GOAL_TO_BUNDLE[args.goal]
+    elif args.non_interactive:
+        bundle = _suggest_bundle_from_host()
+    else:
+        # interactive: ask the question.
+        print("What do you want to ship this week?")
+        print("  1) solo work — client reports, outreach, invoicing")
+        print("  2) fleet work — multi-skill agent fleet")
+        choice = input("Choice [1]: ").strip() or "1"
+        if choice == "1":
+            bundle = _GOAL_TO_BUNDLE["solo"]
+        elif choice == "2":
+            bundle = _GOAL_TO_BUNDLE["fleet"]
+        else:
+            print("Invalid choice; defaulting to solo.")
+            bundle = _GOAL_TO_BUNDLE["solo"]
+
+    skills = _BUNDLES[bundle]
+    if args.json:
+        print(json.dumps({"bundle": bundle, "skills": skills}, indent=2))
+        return
+    print(f"Recommended bundle: {bundle}")
+    print("Skills:")
+    for s in skills:
+        print(f"  - {s}")
+    print()
+    print(f"To install: recipes install {bundle}")
+
+
 # ─── Argument Parser ──────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -911,6 +1047,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Agent class hash (hex, 8-64 chars, optional)",
     )
 
+    # ── capabilities ──
+    p_cap = sub.add_parser(
+        "capabilities",
+        help="Probe host for installed tooling (git, python, docker, ...)",
+    )
+    p_cap.add_argument("--json", action="store_true", help="Emit JSON")
+
+    # ── onboard ──
+    p_on = sub.add_parser(
+        "onboard",
+        help="Detect host and suggest a starter bundle",
+    )
+    p_on.add_argument(
+        "--goal",
+        choices=None,  # validated in cmd_onboard for clearer error messages
+        default=None,
+        help="solo or fleet (skip the interactive prompt)",
+    )
+    p_on.add_argument(
+        "--non-interactive",
+        action="store_true",
+        dest="non_interactive",
+        help="Do not prompt; use heuristic + flags",
+    )
+    p_on.add_argument("--json", action="store_true", help="Emit JSON")
+
     return parser
 
 
@@ -927,6 +1089,8 @@ def main() -> None:
         "update": cmd_update,
         "list": cmd_list,
         "telemetry": cmd_telemetry,
+        "capabilities": cmd_capabilities,
+        "onboard": cmd_onboard,
     }
     dispatch[args.command](args)
 

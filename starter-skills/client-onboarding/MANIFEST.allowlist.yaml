@@ -1,0 +1,9 @@
+name: client-onboarding
+allowlist:
+  urls: []
+  hostnames: []
+  emails: []
+  env_vars: []
+  paths: []
+  ports: []
+  names: []

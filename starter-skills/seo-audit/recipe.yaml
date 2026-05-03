@@ -1,0 +1,9 @@
+name: seo-audit
+version: 1.0.0
+tier: paid
+summary: Technical and on-page site audit with ranked remediation plan.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

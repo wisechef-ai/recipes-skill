@@ -1,0 +1,9 @@
+name: cold-outreach
+version: 1.0.0
+tier: paid
+summary: Drafts and schedules multi-touch cold outreach sequences.
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

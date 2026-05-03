@@ -1,0 +1,15 @@
+name: starter-solo-operator
+version: 1.0.0
+tier: paid
+summary: 5-skill starter pack for a solo agency operator.
+skills:
+  - client-reporter
+  - cold-outreach
+  - content-calendar
+  - seo-audit
+  - invoice-automation
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported

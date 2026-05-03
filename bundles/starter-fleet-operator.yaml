@@ -1,0 +1,20 @@
+name: starter-fleet-operator
+version: 1.0.0
+tier: paid
+summary: 10-skill bundle for an agency running an agent fleet.
+skills:
+  - recipes-skill
+  - client-reporter
+  - cold-outreach
+  - content-calendar
+  - seo-audit
+  - proposal-builder
+  - client-onboarding
+  - invoice-automation
+  - slack-standup
+  - gohighlevel-toolkit
+runtimes:
+  hermes: supported
+  openclaw: supported
+  byoa-codex: supported
+  byoa-claudecode: supported
