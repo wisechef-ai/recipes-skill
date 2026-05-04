@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# chef — main entrypoint dispatching to sub-commands
+set -e
+
+CHEF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS="${CHEF_DIR}/scripts"
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<EOF
+chef — your one-person company on autopilot (v${VERSION})
+
+USAGE:
+  chef <command> [options]
+
+COMMANDS:
+  morning       Yesterday's events, today's priorities, overnight spend
+  marketing     Content pipeline status, posts to schedule
+  code <task>   Delegate a coding task to local agent (Codex/Claude Code)
+  tickets       Project board triage (stale, blocked, ready-to-merge)
+  weekly        7-day retrospective with MRR + spend (Sunday)
+  doctor        Diagnostic check: config, integrations, network
+  setup         Interactive setup wizard (creates ~/.config/chef/config.yaml)
+  --version     Show version
+  --help        Show this help
+
+EXAMPLES:
+  chef morning
+  chef tickets --json
+  chef code "add error logging to main.py"
+  chef weekly --force      # run on a non-Sunday
+
+CONFIG: ~/.config/chef/config.yaml (run \`chef setup\` to create)
+DOCS:   https://recipes.wisechef.ai/skills/chef
+EOF
+}
+
+doctor() {
+  echo "═══ chef doctor ═══"
+  echo ""
+  echo "VERSION: ${VERSION}"
+  echo "INSTALL DIR: ${CHEF_DIR}"
+  echo ""
+  echo "PYTHON: $(python3 --version 2>&1)"
+  echo ""
+  echo "CONFIG: ~/.config/chef/config.yaml"
+  if [ -f "${HOME}/.config/chef/config.yaml" ]; then
+    echo "  ✓ exists"
+  else
+    echo "  ✗ missing — run 'chef setup'"
+  fi
+  echo ""
+  echo "ENV VARS"
+  for var in PAPERCLIP_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY ZAI_API_KEY POSTIZ_API_KEY STRIPE_API_KEY; do
+    if [ -n "${!var}" ]; then
+      echo "  ✓ ${var} set"
+    else
+      echo "  - ${var} (optional)"
+    fi
+  done
+  echo ""
+  echo "DELEGATES"
+  for bin in codex claude paperclip gws; do
+    if command -v ${bin} >/dev/null 2>&1; then
+      echo "  ✓ ${bin}"
+    else
+      echo "  - ${bin} (optional)"
+    fi
+  done
+}
+
+setup() {
+  CONFIG_DIR="${HOME}/.config/chef"
+  CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+
+  if [ -f "${CONFIG_FILE}" ]; then
+    echo "Config already exists at ${CONFIG_FILE}"
+    echo "Edit it directly, or remove first to re-run setup."
+    return 1
+  fi
+
+  mkdir -p "${CONFIG_DIR}"
+  cat > "${CONFIG_FILE}" <<'YAML'
+# chef config — edit to taste, or set env vars directly
+project_board:
+  type: paperclip            # or: linear, jira, github-projects, none
+  api_key_env: PAPERCLIP_API_KEY
+
+ai_providers:
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+  openai:
+    api_key_env: OPENAI_API_KEY
+
+content_pipeline:
+  type: postiz               # or: buffer, hypefury, manual, none
+  api_key_env: POSTIZ_API_KEY
+
+revenue:
+  type: stripe               # or: lemonsqueezy, manual, none
+  api_key_env: STRIPE_API_KEY
+
+calendar:
+  type: none                 # or: gws, gcal, outlook
+
+delegate:
+  prefer: codex              # or: claude, hermes
+YAML
+
+  echo "✓ Config written to ${CONFIG_FILE}"
+  echo "  Edit it to your liking, then run 'chef morning' to test."
+}
+
+# main dispatch
+case "${1:-}" in
+  morning)    shift; exec python3 "${SCRIPTS}/morning.py"   "$@" ;;
+  marketing)  shift; exec python3 "${SCRIPTS}/marketing.py" "$@" ;;
+  code)       shift; exec python3 "${SCRIPTS}/code.py"      "$@" ;;
+  tickets)    shift; exec python3 "${SCRIPTS}/tickets.py"   "$@" ;;
+  weekly)     shift; exec python3 "${SCRIPTS}/weekly.py"    "$@" ;;
+  doctor)     doctor ;;
+  setup)      setup ;;
+  --version)  echo "chef ${VERSION}" ;;
+  --help|-h|help|"") usage ;;
+  *)          echo "Unknown command: $1"; usage; exit 1 ;;
+esac
