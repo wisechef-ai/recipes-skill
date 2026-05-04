@@ -22,6 +22,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install pytest
-        run: pip install pytest cryptography
+        run: pip install pytest cryptography pyyaml
       - name: Run unit tests
         run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v
