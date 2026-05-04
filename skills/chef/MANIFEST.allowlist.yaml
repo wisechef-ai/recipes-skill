@@ -1,0 +1,44 @@
+# chef skill — declared allowlist of external strings
+# Required by recipes-skill A.7 PII linter (positive-list approach).
+allowed_external_strings:
+  # Public infrastructure URLs
+  - "recipes.wisechef.ai"
+  - "paperclip.dev"
+  - "stripe.com"
+  - "postiz.com"
+  - "linear.app"
+  - "anthropic.com"
+  - "openai.com"
+  - "z.ai"
+
+  # Standard env var names
+  - "PAPERCLIP_API_KEY"
+  - "ANTHROPIC_API_KEY"
+  - "OPENAI_API_KEY"
+  - "ZAI_API_KEY"
+  - "POSTIZ_API_KEY"
+  - "STRIPE_API_KEY"
+  - "CHEF_AUTO_DELEGATE"
+  - "CHEF_CONFIG"
+  - "RECIPES_REPORT_ERRORS"
+
+  # Standard binary names
+  - "python3"
+  - "bash"
+  - "codex"
+  - "claude"
+  - "paperclip"
+  - "gws"
+
+  # Standard config paths
+  - "~/.config/chef/"
+  - "~/.cache/chef/"
+
+  # Generic placeholders
+  - "https://paperclip.example.com"
+  - "you@example.com"
+
+  # Public attributions
+  - "WiseChef"
+  - "Apache-2.0"
+  - "MIT"

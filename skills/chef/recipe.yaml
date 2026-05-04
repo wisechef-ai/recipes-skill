@@ -1,0 +1,68 @@
+# chef skill — recipe.yaml
+# Declares runtime requirements for installer + recipes-mcp
+schema_version: "1.0"
+name: chef
+version: "0.1.0"
+tier: free
+license: Apache-2.0
+
+runtime:
+  binaries:
+    - python3
+    - bash
+  python_packages:
+    - requests
+    - pyyaml
+    - python-dateutil
+  optional_binaries:
+    - paperclip
+    - codex
+    - claude
+    - gws
+
+  compatibility:
+    os: [linux, macos]
+    arch: [x86_64, arm64]
+    python_min: "3.10"
+    network: optional   # works offline with cached data
+    ram_gb_min: 0.5
+    disk_gb_min: 0.1
+
+config:
+  required_env: []   # graceful degradation; nothing strictly required
+  optional_env:
+    - PAPERCLIP_API_KEY
+    - ANTHROPIC_API_KEY
+    - OPENAI_API_KEY
+    - ZAI_API_KEY
+    - POSTIZ_API_KEY
+    - STRIPE_API_KEY
+
+  config_file: "~/.config/chef/config.yaml"
+  config_template: "config.yaml.example"
+
+entrypoint: "chef"
+help: "chef --help"
+
+scripts:
+  - name: morning
+    path: "scripts/morning.py"
+    description: "Yesterday's events, today's priorities, $ overnight"
+  - name: marketing
+    path: "scripts/marketing.py"
+    description: "Content pipeline status, posts to schedule"
+  - name: code
+    path: "scripts/code.py"
+    description: "Delegate a coding task to local agent"
+  - name: tickets
+    path: "scripts/tickets.py"
+    description: "Project board triage"
+  - name: weekly
+    path: "scripts/weekly.py"
+    description: "7-day retrospective with MRR + spend"
+
+graceful_degradation:
+  - "If project_board credentials missing: chef tickets returns stub with setup instructions"
+  - "If content_pipeline credentials missing: chef marketing shows draft + setup instructions"
+  - "If revenue credentials missing: chef weekly skips MRR section"
+  - "If network unavailable: all commands read from ~/.cache/chef/ and show stale warning"
