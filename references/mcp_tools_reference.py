@@ -1,0 +1,507 @@
+# auto-mirrored from wisechef-ai/recipes-api:app/mcp/server.py
+# DO NOT EDIT here — edit upstream and the bot will sync
+# last sync: commit 2d0f8ad
+
+"""Recipes MCP server — triple transport (SSE, StreamableHTTP, stdio).
+
+* SSE/HTTP — mounted at ``/api/mcp/sse`` (event-stream) +
+  ``/api/mcp/messages/`` (POSTs from the client).
+* StreamableHTTP — mounted at ``/api/mcp/http`` (single-endpoint POST,
+  stateful sessions, MCP spec 2025-03-26).
+* stdio   — ``python -m app.mcp`` for Claude Desktop and other local clients.
+
+Auth on the SSE/StreamableHTTP side reuses ``app.middleware``'s validator.
+The stdio side trusts the env (``RECIPES_API_KEY``) since stdio is a local
+trust boundary.  The handler dispatches a static tool catalogue to the nine
+Phase A + Phase K tools.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any, Awaitable, Callable
+
+import mcp.types as types
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from mcp.server.lowlevel import Server
+from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import SessionLocal, get_db
+from app.mcp.auth import validate_key
+from app.mcp.cookbook_status import get_cookbook_status, invalidate_cookbook_status
+from app.mcp.tools import (
+    recipes_carousel_today,
+    recipes_doctor,
+    recipes_install,
+    recipes_list_cookbook,
+    recipes_recall,
+    recipes_recipify,
+    recipes_search,
+    recipes_seeker,
+    recipes_subrecipe_resolve,
+    recipes_sync,
+)
+
+logger = logging.getLogger("wiserecipes.mcp")
+
+SERVER_NAME = "recipes-mcp"
+SERVER_VERSION = "0.1.0"
+
+
+def _tool_definitions() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="recipes_search",
+            description="Full-text search across the public skill catalog.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "category": {"type": "string"},
+                    "tier": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+            },
+        ),
+        types.Tool(
+            name="recipes_install",
+            description="Return a signed tarball URL + manifest for a skill slug.",
+            inputSchema={
+                "type": "object",
+                "required": ["slug"],
+                "properties": {"slug": {"type": "string"}},
+            },
+        ),
+        types.Tool(
+            name="recipes_list_cookbook",
+            description="List the caller's cookbook and its skill provenance rows.",
+            inputSchema={
+                "type": "object",
+                "properties": {"cookbook_id": {"type": "string"}},
+            },
+        ),
+        types.Tool(
+            name="recipes_recall",
+            description="Hybrid (vector + BM25) skill recall ranked for the caller's tier.",
+            inputSchema={
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "local_context_summary": {"type": "string"},
+                    "tier_filter": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["free", "cook", "operator"]},
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
+            },
+        ),
+        types.Tool(
+            name="recipes_recipify",
+            description=(
+                "Convert a SKILL.md draft into a CookbookSkill row: validates "
+                "YAML frontmatter, classifies the category, infers related "
+                "skills via embedding cosine, writes the skill to the caller's "
+                "cookbook."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["slug", "content"],
+                "properties": {
+                    "slug": {"type": "string"},
+                    "content": {"type": "string"},
+                    "target_cookbook_id": {"type": "string"},
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["private", "public_pending_review"],
+                        "default": "private",
+                    },
+                    "target_subrecipe_id": {"type": "string"},
+                },
+            },
+        ),
+        types.Tool(
+            name="recipes_carousel_today",
+            description="Today's curated carousel of skills.",
+            inputSchema={"type": "object"},
+        ),
+        types.Tool(
+            name="recipes_subrecipe_resolve",
+            description="Phase C stub — resolve a sub-recipe key to a scope.",
+            inputSchema={"type": "object"},
+        ),
+        types.Tool(
+            name="recipes_doctor",
+            description="Audit a local skill install directory for missing files and hardcoded paths.",
+            inputSchema={
+                "type": "object",
+                "required": ["install_dir"],
+                "properties": {"install_dir": {"type": "string"}},
+            },
+        ),
+        types.Tool(
+            name="recipes_seeker",
+            description=(
+                "Probe local vendor skill directories (Claude / Codex / "
+                "Hermes / OpenCode) and diff against the public catalog. "
+                "READ-ONLY — never mutates vendor dirs."
+            ),
+            inputSchema={"type": "object"},
+        ),
+        types.Tool(
+            name="recipes_sync",
+            description=(
+                "Synchronise a cookbook's skills to their latest published "
+                "versions. By default (dry_run=false) this APplies updates "
+                "immediately. Pass dry_run=true to preview the diff without "
+                "mutating state."
+            ),
+            inputSchema={
+                "type": "object",
+                "required": ["cookbook_id"],
+                "properties": {
+                    "cookbook_id": {
+                        "type": "string",
+                        "description": "UUID of the cookbook to synchronise.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "If true, return the diff without applying changes. "
+                            "Default is false (apply immediately)."
+                        ),
+                    },
+                },
+            },
+        ),
+    ]
+
+
+ToolDispatch = Callable[[Session, dict[str, Any], dict[str, Any]], Awaitable[Any] | Any]
+
+
+def _dispatch(name: str, db: Session, args: dict[str, Any], caller: dict[str, Any]) -> Any:
+    """Route a tool name to its implementation. Pure sync — no I/O outside the DB."""
+    if name == "recipes_search":
+        return recipes_search(
+            db,
+            query=args.get("query"),
+            category=args.get("category"),
+            tier=args.get("tier"),
+            limit=int(args.get("limit", 20)),
+        )
+    if name == "recipes_install":
+        return recipes_install(db, slug=args["slug"], api_key_id=caller.get("api_key_id"))
+    if name == "recipes_list_cookbook":
+        return recipes_list_cookbook(
+            db,
+            user_id=caller.get("user_id"),
+            cookbook_id=args.get("cookbook_id"),
+        )
+    if name == "recipes_recall":
+        return recipes_recall(db, **args)
+    if name == "recipes_recipify":
+        return recipes_recipify(db, **args)
+    if name == "recipes_carousel_today":
+        return recipes_carousel_today(db)
+    if name == "recipes_subrecipe_resolve":
+        return recipes_subrecipe_resolve(db, **args)
+    if name == "recipes_doctor":
+        return recipes_doctor(db, install_dir=args["install_dir"])
+    if name == "recipes_seeker":
+        return recipes_seeker(db, **args)
+    if name == "recipes_sync":
+        return recipes_sync(
+            db,
+            cookbook_id=args["cookbook_id"],
+            dry_run=args.get("dry_run", False),
+            caller=caller,
+        )
+    raise ValueError(f"unknown tool: {name}")
+
+
+def call_tool_sync(
+    name: str,
+    args: dict[str, Any],
+    *,
+    caller: dict[str, Any] | None = None,
+    db: Session | None = None,
+) -> dict[str, Any]:
+    """Direct synchronous entry-point used by tests and the stdio loop.
+
+    Injects a ``cookbook_status`` block when the caller is an authenticated
+    user with outdated skills in their cookbooks.
+    """
+    caller = caller or {"scope": "operator", "user_id": None}
+    own_db = db is None
+    session = db or SessionLocal()
+    try:
+        payload = _dispatch(name, session, args or {}, caller)
+
+        # After a successful recipes_sync apply, invalidate cached status
+        if name == "recipes_sync" and isinstance(payload, dict) and payload.get("applied"):
+            invalidate_cookbook_status(caller.get("user_id"))
+
+        # Inject cookbook_status for authenticated users (skip for recipes_sync
+        # itself to avoid noisy double-reporting — sync already returns the diff).
+        if isinstance(payload, dict) and name != "recipes_sync":
+            user_id = caller.get("user_id")
+            status = get_cookbook_status(session, user_id)
+            if status:
+                payload["cookbook_status"] = status
+
+        return payload
+    finally:
+        if own_db:
+            session.close()
+
+
+def build_mcp_server(db_factory: Callable[[], Session] = SessionLocal) -> Server:
+    """Build a fresh ``mcp.Server`` instance bound to the supplied db factory.
+
+    A factory (rather than a single session) is required because each tool
+    invocation needs an independent session — long-lived MCP connections
+    would otherwise leak transactions.
+    """
+    server: Server = Server(SERVER_NAME, version=SERVER_VERSION)
+
+    @server.list_tools()
+    async def _list_tools() -> list[types.Tool]:  # pragma: no cover - thin shim
+        return _tool_definitions()
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+        db = db_factory()
+        try:
+            payload = _dispatch(name, db, arguments or {}, {"scope": "operator", "user_id": None})
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": str(exc), "tool": name}
+        finally:
+            db.close()
+        return [types.TextContent(type="text", text=json.dumps(payload, default=str))]
+
+    return server
+
+
+# ── FastAPI router (SSE transport) ──────────────────────────────────────────
+#
+# Public surface: /api/mcp/{healthz,sse,messages/}
+#
+# Why /api/mcp instead of plain /mcp:
+# The Cloudflare zone fronting recipes.wisechef.ai intercepts literal /mcp/*
+# paths at the edge (likely CF's managed AI Gateway / Workers MCP product)
+# and returns 404 before the request ever reaches our cloudflared tunnel.
+# /api/mcp/* passes through cleanly via the existing /api/* tunnel rule.
+# Verified 2026-05-07 by inspecting cloudflared_tunnel_total_requests counter.
+
+router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+
+# The SseServerTransport must be shared between GET /sse and POST /messages.
+# The path passed here is the public path the SSE endpoint advertises to the
+# client for follow-up POSTs, so it must match the POST route below.
+_sse_transport = SseServerTransport("/api/mcp/messages/")
+
+# ── StreamableHTTP session manager ─────────────────────────────────────────
+#
+# The StreamableHTTPSessionManager wraps StreamableHTTPServerTransport and
+# handles session creation/cleanup automatically.  It needs a task group
+# (started in ``run()``) to manage concurrent sessions.
+#
+# session_idle_timeout=1800s (30 min) prevents Cloudflare's 100s streaming
+# timeout from firing on long-running tools by keeping the session alive.
+# NOTE: The MCP SDK 1.27 does not expose a ping_interval_seconds parameter;
+# if one appears in a future release, add it here and reduce idle_timeout.
+
+_http_session_manager: StreamableHTTPSessionManager | None = None
+
+
+def get_http_session_manager() -> StreamableHTTPSessionManager:
+    """Lazy-initialise the StreamableHTTP session manager.
+
+    Must be called at app startup (inside the lifespan) so the task group
+    is available.  The session manager reuses ``build_mcp_server()`` — the
+    same factory as SSE and stdio — so tool definitions are never duplicated.
+    """
+    global _http_session_manager
+    if _http_session_manager is None:
+        _http_session_manager = StreamableHTTPSessionManager(
+            app=build_mcp_server(),
+            json_response=False,
+            stateless=False,
+            session_idle_timeout=1800,  # 30 min — prevents CF 100s timeout
+        )
+    return _http_session_manager
+
+
+def _reset_http_session_manager() -> None:
+    """Reset the global session manager (for tests only)."""
+    global _http_session_manager
+    _http_session_manager = None
+
+
+def _authenticate(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Validate x-api-key on SSE handshake. Raises HTTPException on failure.
+
+    Uses ``Depends(get_db)`` rather than ``SessionLocal()`` directly so the
+    test suite's ``dependency_overrides`` substitution still applies.
+    """
+    key = request.headers.get("x-api-key")
+    result = validate_key(key, db)
+    if result["scope"] == "unauthorized":
+        raise HTTPException(status_code=401, detail="Invalid or missing x-api-key header")
+    return result
+
+
+@router.get("/healthz")
+def mcp_healthz() -> dict[str, Any]:
+    return {
+        "name": SERVER_NAME,
+        "version": SERVER_VERSION,
+        "tools": [t.name for t in _tool_definitions()],
+    }
+
+
+@router.get("/sse")
+async def mcp_sse(
+    request: Request,
+    _auth: dict[str, Any] = Depends(_authenticate),
+):
+    """SSE transport endpoint. Long-lived connection — client posts to
+    ``/api/mcp/messages/`` for actual JSON-RPC traffic.
+    """
+    server = build_mcp_server()
+
+    async with AsyncExitStack() as stack:
+        streams = await stack.enter_async_context(
+            _sse_transport.connect_sse(request.scope, request.receive, request._send)
+        )
+        read_stream, write_stream = streams
+        init_options = server.create_initialization_options()
+        await server.run(read_stream, write_stream, init_options)
+    return Response(status_code=204)
+
+
+@router.post("/messages/")
+async def mcp_messages(
+    request: Request,
+    _auth: dict[str, Any] = Depends(_authenticate),
+):
+    """POST endpoint paired with the SSE channel. Auth re-checked here so
+    a stale session-id from another caller can't piggyback."""
+    try:
+        await _sse_transport.handle_post_message(
+            request.scope, request.receive, request._send
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp message dispatch failed: %s", exc)
+        return JSONResponse({"detail": "bad message"}, status_code=400)
+    return Response(status_code=202)
+
+
+# ── StreamableHTTP transport route ──────────────────────────────────────────
+
+# StreamableHTTP uses a raw ASGI handler (not a FastAPI route) because the
+# session manager sends HTTP responses directly via the ASGI ``send``
+# callable — FastAPI's route wrapper would attempt to send a second response
+# and trigger "Received multiple http.response.start messages".
+#
+# We use a Starlette Mount to attach it at /api/mcp/http.
+
+from starlette.routing import Mount
+
+
+def _build_streamable_http_mount() -> Mount:
+    """Create a Starlette Mount that forwards all requests to the session
+    manager's ASGI handler.  Must be called *after* the session manager has
+    been initialised (i.e., during app creation, not at import time).
+
+    Includes an auth gate that validates x-api-key on every request.
+    """
+    mgr = get_http_session_manager()
+
+    async def _asgi_app(scope, receive, send):
+        # Auth gate: validate x-api-key before forwarding to the MCP session
+        # manager. This mirrors the _authenticate dependency used by the SSE
+        # transport routes.
+        if scope["type"] == "http":
+            from app.mcp.auth import validate_key
+
+            request = Request(scope, receive)
+            key = request.headers.get("x-api-key")
+
+            # Fast-path: check master key without opening a DB session.
+            # This avoids needing PostgreSQL in the test environment.
+            if not key or not key.startswith("rec_"):
+                response = JSONResponse(
+                    {"detail": "Invalid or missing x-api-key header"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+
+            if key == settings.API_KEY:
+                # Master key — skip DB lookup
+                pass
+            else:
+                # Non-master key — need DB lookup
+                from app.database import SessionLocal
+
+                db = SessionLocal()
+                try:
+                    result = validate_key(key, db)
+                finally:
+                    db.close()
+                if result["scope"] == "unauthorized":
+                    response = JSONResponse(
+                        {"detail": "Invalid or missing x-api-key header"},
+                        status_code=401,
+                    )
+                    await response(scope, receive, send)
+                    return
+        await mgr.handle_request(scope, receive, send)
+
+    return Mount("/api/mcp/http", app=_asgi_app)
+
+
+@asynccontextmanager
+async def run_streamable_http():
+    """Async context manager that starts the StreamableHTTP session manager's
+    task group.  Call this inside the FastAPI lifespan.
+
+    Usage::
+
+        async with run_streamable_http():
+            yield  # app is running
+    """
+    mgr = get_http_session_manager()
+    async with mgr.run():
+        yield
+
+
+# ── stdio entry point ──────────────────────────────────────────────────────
+
+async def run_stdio() -> None:  # pragma: no cover - exercised via __main__
+    """Run the MCP server on stdio (for Claude Desktop & similar)."""
+    expected = os.environ.get("RECIPES_API_KEY") or settings.API_KEY
+    provided = os.environ.get("RECIPES_API_KEY")
+    if provided and provided != expected and provided != settings.API_KEY:
+        logger.warning("RECIPES_API_KEY mismatch — accepting anyway in stdio trust mode")
+
+    from mcp.server.stdio import stdio_server
+
+    server = build_mcp_server()
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
