@@ -1,128 +1,110 @@
-<!-- auto-mirrored from wisechef-ai/recipes-api:docs/recipes-skill/README.md -->
-<!-- DO NOT EDIT here — edit upstream and the bot will sync -->
-<!-- last sync: commit 2d0f8ad -->
+# Recipes Skill
 
-# Recipes — The Skill Marketplace for AI Agents
+Install agent skills from recipes.wisechef.ai into Claude Code, Cursor, Windsurf, OpenClaw, Hermes, or any Anthropic Skills-compatible host.
 
-**Give your agent superpowers. Search, install, and run curated skills — in under 60 seconds.**
-
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
-## The 60-Second Pitch
+## Install
 
-You're an AI agent (or you operate one). You want **composable, trusted capabilities** — not brittle API glue. Recipes is the marketplace where human-reviewed skills live. One MCP connection gives your agent 10+ tools for search, install, recall, diagnostics, and more. No dependencies. No vendor lock-in. Just skills that work.
+Replace `<slug>` with the skill slug from [recipes.wisechef.ai/skills](https://recipes.wisechef.ai/skills).
 
-**Publishers** earn recurring revenue via usage-attributed Stripe Connect payouts. **Subscribers** get auto-updating skills with zero config drift. **Teams** share private cookbooks with a single CLI command.
+| Agent host | Install command |
+|------------|----------------|
+| **Claude Code** | `npx @wisechef/recipes-skill install <slug>` |
+| **Cursor** | `pip install recipes-cli` then `recipes install <slug>` |
+| **Windsurf** | `pip install recipes-cli` then `recipes install <slug>` |
+| **Cline** | `pip install recipes-cli` then `recipes install <slug>` |
+| **OpenClaw** | `claw skill install recipes:<slug>` |
+| **Hermes** | `hermes skill install recipes:<slug>` |
 
----
+The install command fetches the skill manifest from the Recipes API, validates the allowlist against your agent host's policy, verifies the ed25519 signature, resolves dependencies, and writes the skill to your agent's workspace. No manual steps.
 
-## Quick Install
-
-### Hermes (StreamableHTTP)
-
-Add to `~/.hermes/config.yaml`:
-
-```yaml
-mcpServers:
-  recipes:
-    transport: streamable-http
-    url: https://recipes.wisechef.ai/api/mcp/http
-    headers:
-      x-api-key: YOUR_API_KEY
-```
-
-### Claude Desktop
-
-Add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "recipes": {
-      "type": "streamable-http",
-      "url": "https://recipes.wisechef.ai/api/mcp/http",
-      "headers": {
-        "x-api-key": "YOUR_API_KEY"
-      }
-    }
-  }
-}
-```
-
-### Codex CLI
-
-Set in your environment:
+**Quick start with the free gateway skill:**
 
 ```bash
-export RECIPES_API_KEY=YOUR_API_KEY
-# Then reference in your Codex MCP config pointing to:
-# https://recipes.wisechef.ai/api/mcp/http
+npx @wisechef/recipes-skill install super-memory
 ```
 
-> Get your API key at [recipes.wisechef.ai/signin](https://recipes.wisechef.ai/signin) — free tier available.
-
----
-
-## Quickstarts
-
-| Guide | Time | What you'll do |
-|-------|------|----------------|
-| [Publisher quickstart](./QUICKSTART-publisher.md) | 5 min | Publish your first skill to the marketplace |
-| [Subscriber quickstart](./QUICKSTART-subscriber.md) | 5 min | Install + auto-update your first skill |
-| [Cookbook sharing](./QUICKSTART-share.md) | 3 min | Share a private cookbook with another agent |
-
----
-
-## The 10 MCP Tools
-
-Once connected, your agent gets these tools — no extra configuration:
-
-| Tool | What it does |
-|------|-------------|
-| `recipes_search` | BM25 + semantic search across all marketplace skills |
-| `recipes_install` | Install a skill into your agent's workspace |
-| `recipes_list_cookbook` | List all cookbooks (and their skills) you have access to |
-| `recipes_recall` | Recall the full content of a previously installed skill |
-| `recipes_recipify` | Classify + validate a skill before publishing |
-| `recipes_carousel_today` | Get today's editorially curated skill picks |
-| `recipes_doctor` | Diagnose issues with installed skills |
-| `recipes_seeker` | Find related skills and dependency edges |
-| `recipes_subrecipe_resolve` | Resolve nested skill dependencies |
-| `recipes_sync` | Auto-update installed skills (APPLY / DRY_RUN) |
+No account required. See [recipes.wisechef.ai/skills/super-memory](https://recipes.wisechef.ai/skills/super-memory).
 
 ---
 
 ## Pricing
 
-| Tier | Price | What you get |
-|------|-------|-------------|
-| **Free** | €0/mo | Search, install free-tier skills, 5 installs |
-| **Cook** | €20/mo | Unlimited installs, Pro-tier skills, cookbook sharing |
-| **Operator** | €100/mo | Everything in Cook + private cookbooks, priority support, analytics |
-| **Studio** | Custom | White-label, SLA, custom integrations |
+| Tier | Price | Seats | What you get |
+|------|-------|-------|-------------|
+| **Free** | $0/mo | 1 | Free skills only (currently 2, including super-memory) |
+| **Pro** | $20/mo | 1 | All 38 Pro-tier skills + full catalog access |
+| **Pro+** | $100/mo | 20 endpoints | All 14 Pro+ skills + fleet sync across 20 agent endpoints |
 
-All tiers include MCP access. Publishers earn on every attributed use.
+Free skills are always free — no subscription required, no credit card, no expiry.
 
----
+Pro and Pro+ are billed in USD. Full pricing details and a tier comparison at [recipes.wisechef.ai/pricing](https://recipes.wisechef.ai/pricing).
 
-## What's New in v7.1
-
-- **Cookbook share tokens** — share a cookbook with any agent via a single `cbt_` token
-- **Auto-update via `recipes_sync`** — keep installed skills current with zero effort
-- **StreamableHTTP MCP** — cleaner transport, better error handling, no SSE fallback needed
-- **BM25 reindex on publish** — new skills are searchable within seconds
+Note for API consumers: the REST API returns `tier: "cook"` for Pro and `tier: "operator"` for Pro+. These are stable DB identifiers. The display labels (Pro / Pro+) are portal-only. See the Common Issues section below.
 
 ---
 
-## Links
+## Earn 50% Recurring
 
-- 🌐 [recipes.wisechef.ai](https://recipes.wisechef.ai) — browse the marketplace
-- 📖 [API docs](https://recipes.wisechef.ai/docs/api-reference) — full REST reference
-- 🐛 [Issues](https://github.com/wisechef-ai/recipes-skill/issues) — report bugs
-- 💬 [Discord](https://discord.gg/wisechef) — community support
+Sign up as a creator at [recipes.wisechef.ai/creators](https://recipes.wisechef.ai/creators). You get a referral link. Every user who clicks your link and subscribes within 30 days generates 50% of their monthly subscription fee — paid to you, every month, for as long as they stay subscribed.
+
+- Pro referral: $10/month per subscriber, recurring
+- Pro+ referral: $50/month per subscriber, recurring
+- No cap. No expiry. No cliff.
+
+The first 100 creators who publish an approved skill get permanent featured placement in the catalog — a `featured` badge and priority in search results. This is not a time-limited promotion; the first 100 slots are permanent.
+
+To publish a skill: open a PR against this repo. The 5-step quality pipeline (security scan, discipline check, quality score, allowlist validation, manifest integrity) runs automatically. Pass all five and a human reviewer approves. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full submission process.
 
 ---
 
-*Recipes is built by [WiseChef](https://wisechef.ai). Licensed under Apache 2.0.*
+## Common Issues
+
+### Skill won't install on macOS Apple Silicon
+
+Symptom: install fails with a dependency resolution error mentioning `cognee` or `pgvector`.
+
+Fix: cognee 1.0.9 (in super-memory PR #67) resolves the Apple Silicon wheel incompatibility. If you installed super-memory before PR #67 was merged, reinstall:
+
+```bash
+npx @wisechef/recipes-skill install super-memory
+```
+
+The installer is idempotent — reinstalling over an existing skill updates it in place.
+
+---
+
+### "Architecture-aware install said no"
+
+Symptom: install prints `refused: incompatible host` and exits non-zero.
+
+This is intentional. The Recipes installer probes your agent host before writing any files. If the host does not implement the Anthropic Skills handshake (allowlist validation, signature verification), the installer refuses rather than silently installing an unverified skill. This protects you from skills that could exfiltrate data or exceed their stated network permissions.
+
+Check that your agent host version supports the Anthropic Skills standard. See [recipes.wisechef.ai/docs/install](https://recipes.wisechef.ai/docs/install) for per-host compatibility notes.
+
+---
+
+### "I see Pro/Pro+ in the UI but the API still returns cook/operator"
+
+This is by design. The rev7.3 release renamed the display labels from Cook→Pro and Operator→Pro+. The underlying DB slugs (`cook`, `operator`) were not changed — they are stable API contract identifiers.
+
+If you are building against the API, use `cook` and `operator` as the tier identifiers. They will not change. The portal displays "Pro" and "Pro+" for user-facing clarity; the API returns the stable slugs.
+
+---
+
+### "My install_count looks wrong"
+
+install_count values are reconciled hourly by `install_count_drift_probe.py` (cron job on the Recipes backend). If a batch of install events arrived out-of-order (common when multiple agent hosts flush install queues simultaneously), counts can appear stale for up to 1 hour.
+
+Events within 5 minutes of real-time are considered in-flight and excluded from the reconciliation window. If your count looks wrong for more than 1 hour after an install, open an issue.
+
+---
+
+## License
+
+This repository is MIT licensed. See [LICENSE](LICENSE).
+
+Each skill in the catalog has its own license declared in its `SKILL.md` frontmatter. The default for skills published without an explicit license is MIT. Check the skill's SKILL.md before depending on it in a commercial project.
