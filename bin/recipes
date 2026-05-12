@@ -8,6 +8,7 @@ Usage:
   recipes publish [--api-key=<key>] [--private]
   recipes install <slug>[@<version>] [--client-mode] [--report-to=<url>] [--force]
   recipes update [<slug>]
+  recipes sync [--channel=stable|latest] [--dry-run] [--quiet]
   recipes list
 
 Python 3.11+ stdlib only (+ cryptography for ed25519).
@@ -629,6 +630,280 @@ def cmd_update(args: argparse.Namespace) -> None:
     print(f"\nDone. {updated} skill(s) updated.")
 
 
+# ─── Subcommand: sync ─────────────────────────────────────────────────────────
+
+SYNC_LOG = pathlib.Path.home() / ".hermes" / "recipes-sync.log"
+SYNC_STATE = pathlib.Path.home() / ".hermes" / "recipes-sync-state.json"
+
+
+def _detect_local_edits(skill_dir: pathlib.Path) -> list[str]:
+    """Check for files that differ from the original tarball install.
+
+    We compare against the stored sha256 of the tarball — if any file has
+    been modified since install, the directory hash won't match. For
+    lightweight detection we just check if any file mtime is newer than
+    the .recipes-meta.json creation time.
+    """
+    meta_path = skill_dir / ".recipes-meta.json"
+    if not meta_path.exists():
+        return []
+
+    meta_stat = meta_path.stat()
+    edited: list[str] = []
+    for fpath in skill_dir.rglob("*"):
+        if fpath.is_dir():
+            continue
+        if fpath.name == ".recipes-meta.json":
+            continue
+        try:
+            if fpath.stat().st_mtime > meta_stat.st_mtime + 1:
+                edited.append(str(fpath.relative_to(skill_dir)))
+        except OSError:
+            pass
+    return edited
+
+
+def _parse_version(ver: str) -> tuple[int, ...]:
+    """Best-effort semantic version tuple for comparison."""
+    try:
+        parts = ver.lstrip("v").split(".")
+        return tuple(int(p) for p in parts)
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def _write_sync_log(entries: list[dict]) -> None:
+    """Append sync results to the persistent changelog."""
+    SYNC_LOG.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    with open(SYNC_LOG, "a", encoding="utf-8") as f:
+        f.write(f"\n--- sync {now} ---\n")
+        for entry in entries:
+            action = entry.get("action", "unknown")
+            slug = entry.get("slug", "?")
+            if action == "updated":
+                old = entry.get("old_version", "?")
+                new = entry.get("new_version", "?")
+                f.write(f"  UPDATED {slug}: {old} -> {new}\n")
+            elif action == "skipped_local_edits":
+                f.write(f"  SKIPPED {slug}: local edits detected (drift)\n")
+            elif action == "skipped_current":
+                f.write(f"  OK      {slug}: already current\n")
+            elif action == "failed":
+                reason = entry.get("reason", "unknown error")
+                f.write(f"  FAILED  {slug}: {reason}\n")
+            else:
+                f.write(f"  {action.upper():8} {slug}\n")
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    """Pull all entitled skill bundles and install/update locally.
+
+    Behaviours:
+    - Scans ~/.hermes/skills for installed skills via .recipes-meta.json
+    - Queries the API for the latest version of each
+    - Installs updates for skills with newer remote versions
+    - Detects local file modifications and skips update if drift detected
+    - Writes a changelog to ~/.hermes/recipes-sync.log
+    - If drift > 24h on local edits, emits a warning (caller can Discord ping)
+    """
+    dry_run: bool = getattr(args, "dry_run", False)
+    quiet: bool = getattr(args, "quiet", False)
+    channel: str = getattr(args, "channel", "stable")
+
+    def _log(msg: str) -> None:
+        if not quiet:
+            print(msg)
+
+    if not SKILLS_DIR.exists():
+        _log("No skills installed (skills dir not found).")
+        return
+
+    meta_files = sorted(SKILLS_DIR.rglob(".recipes-meta.json"))
+    if not meta_files:
+        _log("No installed skills found.")
+        return
+
+    api_key = os.environ.get("RECIPES_API_KEY", "")
+    req_headers: dict[str, str] = {}
+    if api_key:
+        req_headers["x-api-key"] = api_key
+
+    log_entries: list[dict] = []
+    updated = 0
+    skipped_edits = 0
+    failed = 0
+    current_count = 0
+
+    # Load previous sync state for drift detection
+    prev_state: dict = {}
+    if SYNC_STATE.exists():
+        try:
+            with open(SYNC_STATE, encoding="utf-8") as f:
+                prev_state = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    new_state: dict = {}
+
+    for meta_path in meta_files:
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            log_entries.append({"action": "failed", "slug": "?", "reason": str(e)})
+            failed += 1
+            continue
+
+        slug = meta.get("slug", "")
+        current_version = meta.get("version", "")
+        installed_at = meta.get("installed_at", "")
+        skill_dir = meta_path.parent
+
+        # Detect local edits
+        local_edits = _detect_local_edits(skill_dir)
+
+        # Check drift timing — if installed >24h ago and has local edits
+        installed_time = None
+        if installed_at:
+            try:
+                installed_time = datetime.fromisoformat(installed_at)
+                if installed_time.tzinfo is None:
+                    installed_time = installed_time.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+
+        drift_hours = 0.0
+        if installed_time and local_edits:
+            drift_delta = datetime.now(timezone.utc) - installed_time
+            drift_hours = drift_delta.total_seconds() / 3600
+
+        # Fetch latest from API
+        url = f"{API_BASE}/skills/install?slug={urllib.parse.quote(slug)}"
+        try:
+            info = api_get(url, headers=req_headers)
+        except SystemExit as e:
+            log_entries.append({"action": "failed", "slug": slug, "reason": str(e)})
+            _log(f"  ✗ {slug}: failed to fetch — {e}")
+            failed += 1
+            continue
+
+        latest_version = info.get("version", "")
+
+        # Channel filter: 'stable' skips pre-release versions
+        if channel == "stable" and "-" in latest_version:
+            _log(f"  ⊘ {slug}: latest {latest_version} is pre-release, skipping (stable channel)")
+            log_entries.append({
+                "action": "skipped_channel",
+                "slug": slug,
+                "version": latest_version,
+            })
+            new_state[slug] = {"version": current_version, "latest_seen": latest_version}
+            continue
+
+        new_state[slug] = {"version": current_version, "latest_seen": latest_version}
+
+        if latest_version == current_version:
+            log_entries.append({
+                "action": "skipped_current",
+                "slug": slug,
+                "version": current_version,
+            })
+            current_count += 1
+            continue
+
+        # Local edit conflict
+        if local_edits:
+            if drift_hours > 24:
+                _log(
+                    f"  ⚠ {slug}: LOCAL EDITS CONFLICT (drift: {drift_hours:.1f}h) — "
+                    f"skipping update {current_version} → {latest_version}"
+                )
+                _log(f"    Edited files: {', '.join(local_edits[:5])}")
+            else:
+                _log(
+                    f"  ⚠ {slug}: local edits detected ({len(local_edits)} files), "
+                    f"skipping update {current_version} → {latest_version}"
+                )
+            log_entries.append({
+                "action": "skipped_local_edits",
+                "slug": slug,
+                "old_version": current_version,
+                "new_version": latest_version,
+                "edited_files": local_edits[:5],
+                "drift_hours": round(drift_hours, 1),
+            })
+            skipped_edits += 1
+            continue
+
+        # Ready to update
+        _log(f"  ↑ {slug}: {current_version} → {latest_version}")
+
+        if dry_run:
+            log_entries.append({
+                "action": "would_update",
+                "slug": slug,
+                "old_version": current_version,
+                "new_version": latest_version,
+            })
+            updated += 1
+            continue
+
+        # Perform the install
+        class _FakeArgs:
+            pass
+
+        fake = _FakeArgs()
+        fake.slug = f"{slug}@{latest_version}"
+        fake.force = True
+        fake.client_mode = meta.get("client_mode", False)
+        fake.report_to = meta.get("report_to", None)
+        try:
+            cmd_install(fake)
+            log_entries.append({
+                "action": "updated",
+                "slug": slug,
+                "old_version": current_version,
+                "new_version": latest_version,
+            })
+            new_state[slug]["version"] = latest_version
+            updated += 1
+        except SystemExit as e:
+            log_entries.append({
+                "action": "failed",
+                "slug": slug,
+                "old_version": current_version,
+                "new_version": latest_version,
+                "reason": str(e),
+            })
+            failed += 1
+
+    # Write sync log
+    _write_sync_log(log_entries)
+
+    # Persist sync state
+    SYNC_STATE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SYNC_STATE, "w", encoding="utf-8") as f:
+        json.dump({
+            "last_sync": datetime.now(timezone.utc).isoformat(),
+            "channel": channel,
+            "skills": new_state,
+        }, f, indent=2)
+
+    # Summary
+    mode_label = " (dry-run)" if dry_run else ""
+    _log(
+        f"\nSync complete{mode_label}: "
+        f"{updated} updated, {skipped_edits} skipped (local edits), "
+        f"{current_count} current, {failed} failed"
+    )
+    _log(f"Sync log: {SYNC_LOG}")
+
+    # Exit non-zero if anything failed
+    if failed > 0:
+        sys.exit(1)
+
+
 # ─── Subcommand: telemetry emit ──────────────────────────────────────────────
 
 _VALID_TELEMETRY_EVENTS = frozenset(
@@ -922,6 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  publish   Sign + upload skill to recipes.wisechef.ai\n"
             "  install   Download + verify + extract a skill\n"
             "  update    Re-install skills that have newer versions\n"
+            "  sync      Pull all entitled bundles and install updates\n"
             "  list      Show all installed skills\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1054,6 +1330,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_cap.add_argument("--json", action="store_true", help="Emit JSON")
 
+    # ── sync ──
+    p_sync = sub.add_parser(
+        "sync",
+        help="Pull all entitled skill bundles and install updates locally",
+    )
+    p_sync.add_argument(
+        "--channel",
+        choices=("stable", "latest"),
+        default="stable",
+        help="Release channel: stable skips pre-releases, latest includes all (default: stable)",
+    )
+    p_sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Show what would be updated without making changes",
+    )
+    p_sync.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress all output except errors",
+    )
+
     # ── onboard ──
     p_on = sub.add_parser(
         "onboard",
@@ -1091,6 +1390,7 @@ def main() -> None:
         "telemetry": cmd_telemetry,
         "capabilities": cmd_capabilities,
         "onboard": cmd_onboard,
+        "sync": cmd_sync,
     }
     dispatch[args.command](args)
 
